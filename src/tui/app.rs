@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
@@ -12,13 +12,12 @@ use crossterm::terminal::{
 use ratatui::text::Text;
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::session::instance::{Group, Status};
+use crate::session::instance::Status;
 use crate::session::store::SessionStore;
 use crate::tmux::client as tmux;
 use crate::tmux::control::TmuxControlClient;
 use crate::tmux::detector::{self, DetectionContext, HookStatus};
 use crate::tui::views::dashboard;
-use crate::tui::views::group_dialog;
 use crate::tui::views::new_session::{self, DialogAction, NewSessionDialog};
 use crate::tui::views::search;
 
@@ -48,10 +47,6 @@ pub enum AppMode {
         query: String,
         filtered_indices: Vec<usize>,
         selected: usize,
-    },
-    GroupDialog {
-        name: String,
-        assign_session: Option<String>,
     },
 }
 
@@ -104,6 +99,8 @@ pub struct App {
     preview_stale: bool,
     /// Cache for token file parsing — avoids re-reading unchanged JSONL files.
     token_cache: crate::session::tokens::TokenCache,
+    /// Project paths whose auto-groups are collapsed (not persisted).
+    collapsed_dirs: HashSet<String>,
 }
 
 impl App {
@@ -144,6 +141,7 @@ impl App {
             preview_content: None,
             preview_stale: true,
             token_cache,
+            collapsed_dirs: HashSet::new(),
         })
     }
 
@@ -162,7 +160,7 @@ impl App {
         dashboard::render_dashboard(
             frame,
             &self.store.sessions,
-            &self.store.groups,
+            &self.collapsed_dirs,
             self.selected,
             self.status_filter.as_deref(),
             self.preview_content.as_ref(),
@@ -198,23 +196,6 @@ impl App {
                 ..
             } => {
                 search::render_search_bar(frame, query, filtered_indices.len(), area);
-            }
-            AppMode::GroupDialog {
-                name,
-                assign_session,
-            } => {
-                // Resolve the session title for display context.
-                let session_title = assign_session.as_ref().and_then(|id| {
-                    self.store
-                        .find_session(id)
-                        .map(|s| s.title.clone())
-                });
-                group_dialog::render_group_dialog(
-                    frame,
-                    name,
-                    session_title.as_deref(),
-                    area,
-                );
             }
             AppMode::Normal => {}
         }
@@ -310,9 +291,6 @@ impl App {
             AppMode::Search { .. } => {
                 self.handle_search_key(key);
             }
-            AppMode::GroupDialog { .. } => {
-                self.handle_group_dialog_key(key);
-            }
         }
     }
 
@@ -353,13 +331,6 @@ impl App {
                     query: String::new(),
                     filtered_indices,
                     selected: 0,
-                };
-            }
-            KeyCode::Char('g') => {
-                let assign_session = self.selected_session_id();
-                self.mode = AppMode::GroupDialog {
-                    name: String::new(),
-                    assign_session,
                 };
             }
             KeyCode::Char('h') | KeyCode::Left => {
@@ -651,7 +622,7 @@ impl App {
     fn display_count(&self) -> usize {
         dashboard::display_item_count(
             &self.store.sessions,
-            &self.store.groups,
+            &self.collapsed_dirs,
             self.status_filter.as_deref(),
         )
     }
@@ -687,7 +658,6 @@ impl App {
     /// Get the session id of the currently selected item (if it is a session
     /// row, not a group header).
     fn selected_session_id(&self) -> Option<String> {
-        // Walk the flattened list to find which item the cursor is on.
         let filtered: Vec<&crate::session::instance::Session> = self
             .store
             .sessions
@@ -700,54 +670,38 @@ impl App {
             })
             .collect();
 
+        // Walk the auto-grouped display list by project_path.
+        let mut seen = HashSet::new();
+        let mut paths: Vec<String> = Vec::new();
+        for s in &filtered {
+            let key = s.project_path.to_string_lossy().to_string();
+            if seen.insert(key.clone()) {
+                paths.push(key);
+            }
+        }
+
         let mut idx: usize = 0;
-        for group in &self.store.groups {
+        for path_key in &paths {
             let group_sessions: Vec<&&crate::session::instance::Session> = filtered
                 .iter()
-                .filter(|s| s.group.as_deref() == Some(&group.name))
+                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
                 .collect();
+
+            let expanded = !self.collapsed_dirs.contains(path_key);
 
             // Group header
             if idx == self.selected {
-                return None; // cursor is on a group header
+                return None;
             }
             idx += 1;
 
-            if group.expanded {
+            if expanded {
                 for sess in &group_sessions {
                     if idx == self.selected {
                         return Some(sess.id.clone());
                     }
                     idx += 1;
                 }
-            }
-        }
-
-        // Ungrouped sessions
-        let ungrouped: Vec<&&crate::session::instance::Session> = filtered
-            .iter()
-            .filter(|s| {
-                s.group.is_none()
-                    || !self
-                        .store
-                        .groups
-                        .iter()
-                        .any(|g| Some(g.name.as_str()) == s.group.as_deref())
-            })
-            .collect();
-
-        if !ungrouped.is_empty() {
-            // Ungrouped header
-            if idx == self.selected {
-                return None;
-            }
-            idx += 1;
-
-            for sess in &ungrouped {
-                if idx == self.selected {
-                    return Some(sess.id.clone());
-                }
-                idx += 1;
             }
         }
 
@@ -852,36 +806,52 @@ impl App {
         self.clamp_cursor();
     }
 
-    // --- Group toggle -----------------------------------------------------
+    // --- Group toggle (auto-groups by project_path) -----------------------
 
-    /// Toggle the group that the cursor is currently on.
+    /// Toggle the directory group that the cursor is currently on.
     /// `expand`: if true, try to expand; if false, try to collapse.
-    /// For simplicity we just toggle regardless of the `expand` hint.
     fn toggle_selected_group(&mut self, _expand: bool) {
-        // Find the group name at the current cursor position.
+        let filtered: Vec<&crate::session::instance::Session> = self
+            .store
+            .sessions
+            .iter()
+            .filter(|s| {
+                self.status_filter
+                    .as_ref()
+                    .map(|f| s.status.to_string() == *f)
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        // Collect unique paths in order.
+        let mut seen = HashSet::new();
+        let mut paths: Vec<String> = Vec::new();
+        for s in &filtered {
+            let key = s.project_path.to_string_lossy().to_string();
+            if seen.insert(key.clone()) {
+                paths.push(key);
+            }
+        }
+
         let mut idx: usize = 0;
-        for group in &self.store.groups {
+        for path_key in &paths {
             if idx == self.selected {
-                let name = group.name.clone();
-                self.store.toggle_group(&name);
+                // Toggle this path's collapsed state.
+                if self.collapsed_dirs.contains(path_key) {
+                    self.collapsed_dirs.remove(path_key);
+                } else {
+                    self.collapsed_dirs.insert(path_key.clone());
+                }
                 self.clamp_cursor();
                 return;
             }
             idx += 1;
 
-            if group.expanded {
-                let count = self
-                    .store
-                    .sessions
+            let expanded = !self.collapsed_dirs.contains(path_key);
+            if expanded {
+                let count = filtered
                     .iter()
-                    .filter(|s| {
-                        s.group.as_deref() == Some(&group.name)
-                            && self
-                                .status_filter
-                                .as_ref()
-                                .map(|f| s.status.to_string() == *f)
-                                .unwrap_or(true)
-                    })
+                    .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
                     .count();
                 idx += count;
             }
@@ -969,19 +939,30 @@ impl App {
             })
             .collect();
 
+        // Collect unique paths in order.
+        let mut seen = HashSet::new();
+        let mut paths: Vec<String> = Vec::new();
+        for s in &filtered {
+            let key = s.project_path.to_string_lossy().to_string();
+            if seen.insert(key.clone()) {
+                paths.push(key);
+            }
+        }
+
         let mut indices = Vec::new();
         let mut idx: usize = 0;
 
-        for group in &self.store.groups {
+        for path_key in &paths {
             let group_sessions: Vec<&&crate::session::instance::Session> = filtered
                 .iter()
-                .filter(|s| s.group.as_deref() == Some(&group.name))
+                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
                 .collect();
 
             // Group header row.
             idx += 1;
 
-            if group.expanded {
+            let expanded = !self.collapsed_dirs.contains(path_key);
+            if expanded {
                 for sess in &group_sessions {
                     if query_lower.is_empty()
                         || sess.title.to_lowercase().contains(&query_lower)
@@ -994,84 +975,7 @@ impl App {
             }
         }
 
-        // Ungrouped sessions.
-        let ungrouped: Vec<&&crate::session::instance::Session> = filtered
-            .iter()
-            .filter(|s| {
-                s.group.is_none()
-                    || !self
-                        .store
-                        .groups
-                        .iter()
-                        .any(|g| Some(g.name.as_str()) == s.group.as_deref())
-            })
-            .collect();
-
-        if !ungrouped.is_empty() {
-            // Ungrouped header row.
-            idx += 1;
-
-            for sess in &ungrouped {
-                if query_lower.is_empty()
-                    || sess.title.to_lowercase().contains(&query_lower)
-                    || sess.short_path().to_lowercase().contains(&query_lower)
-                {
-                    indices.push(idx);
-                }
-                idx += 1;
-            }
-        }
-
         indices
-    }
-
-    // --- Group dialog mode ---------------------------------------------------
-
-    /// Handle key events in GroupDialog mode.
-    fn handle_group_dialog_key(&mut self, key: KeyEvent) {
-        let (mut name, assign_session) = match &self.mode {
-            AppMode::GroupDialog {
-                name,
-                assign_session,
-            } => (name.clone(), assign_session.clone()),
-            _ => return,
-        };
-
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = AppMode::Normal;
-                return;
-            }
-            KeyCode::Enter => {
-                if !name.trim().is_empty() {
-                    // Create the group.
-                    self.store.add_group(Group::new(name.trim().to_string()));
-
-                    // Optionally assign the selected session to this group.
-                    if let Some(ref session_id) = assign_session {
-                        if let Some(session) = self.store.find_session_mut(session_id) {
-                            session.group = Some(name.trim().to_string());
-                        }
-                    }
-
-                    let _ = self.store.save();
-                }
-                self.mode = AppMode::Normal;
-                return;
-            }
-            KeyCode::Backspace => {
-                name.pop();
-            }
-            KeyCode::Char(c) => {
-                name.push(c);
-            }
-            _ => {}
-        }
-
-        self.mode = AppMode::GroupDialog {
-            name,
-            assign_session,
-        };
     }
 }
 
@@ -1097,8 +1001,9 @@ pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         // - 50ms when recent activity (< 2s ago)
         // - 100ms when right pane focused (interactive)
         // - 250ms otherwise (list browsing, ~4fps for dot-flash animation)
-        let since_keystroke = Instant::now().duration_since(app.last_keystroke_at);
-        let poll_timeout = if since_keystroke < Duration::from_millis(500) {
+        let now = Instant::now();
+        let since_keystroke = now.duration_since(app.last_keystroke_at);
+        let poll_duration = if since_keystroke < Duration::from_millis(500) {
             Duration::from_millis(16)
         } else if since_keystroke < Duration::from_secs(2) {
             Duration::from_millis(50)
@@ -1108,47 +1013,38 @@ pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             Duration::from_millis(250)
         };
 
-        // Drain ALL pending events before redrawing — avoids a full redraw
-        // between each keystroke during fast typing.
-        if event::poll(poll_timeout)? {
-            loop {
-                match event::read()? {
-                    Event::Key(key) => app.handle_key(key),
-                    Event::Mouse(mouse) => match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            // Scroll up = into history = increase offset.
-                            app.preview_scroll = app.preview_scroll.saturating_add(3);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            // Scroll down = toward live = decrease offset.
-                            app.preview_scroll = app.preview_scroll.saturating_sub(3);
-                        }
-                        _ => {}
-                    },
-                    Event::Resize(_, _) => {
-                        terminal.clear()?;
-                    }
-                    _ => {}
-                }
-                if app.should_quit || !event::poll(Duration::ZERO)? {
-                    break;
-                }
-            }
-            // Snapshot/drop scroll cache based on current scroll position.
-            app.update_scroll_cache();
-            // Reconnect control client once after all events are drained.
-            app.ensure_control_client();
-            // Preview refresh is handled by tick (~500ms) to keep j/k instant.
+        // Tick-based status refresh: ~500ms.
+        if app.last_tick.elapsed() >= Duration::from_millis(500) {
+            app.tick();
+            app.last_tick = Instant::now();
         }
 
-        // Throttle tick to ~500ms regardless of poll rate.
-        // Skip tick if more input is already queued — user input always wins.
-        let now = Instant::now();
-        if now.duration_since(app.last_tick) >= Duration::from_millis(500)
-            && !event::poll(Duration::ZERO)?
-        {
-            app.tick();
-            app.last_tick = now;
+        if event::poll(poll_duration)? {
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if app.focus == FocusPane::Right {
+                                app.preview_scroll += 3;
+                                app.update_scroll_cache();
+                            } else {
+                                app.move_cursor_up();
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if app.focus == FocusPane::Right {
+                                app.preview_scroll = app.preview_scroll.saturating_sub(3);
+                                app.update_scroll_cache();
+                            } else {
+                                app.move_cursor_down();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

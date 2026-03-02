@@ -29,9 +29,6 @@ enum Commands {
         /// Session title
         #[arg(short = 'n', long)]
         title: Option<String>,
-        /// Group name
-        #[arg(short, long)]
-        group: Option<String>,
     },
 }
 
@@ -47,7 +44,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Add { path, tool, title, group }) => {
+        Some(Commands::Add { path, tool, title }) => {
             let mut store = session::store::SessionStore::load()?;
             let tool = session::instance::Tool::from_command(&tool);
             let project_path = std::path::PathBuf::from(&path);
@@ -56,7 +53,7 @@ fn main() -> Result<()> {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string())
             });
-            let session = session::instance::Session::new(title, project_path, tool, group);
+            let session = session::instance::Session::new(title, project_path, tool);
             println!("Created session: {} ({})", session.title, session.id);
             store.add_session(session);
             store.save()?;

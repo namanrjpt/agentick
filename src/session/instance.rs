@@ -154,7 +154,6 @@ pub struct Session {
     #[serde(default)]
     pub status: Status,
 
-    pub group: Option<String>,
     pub tmux_name: String,
     pub created_at: DateTime<Utc>,
     pub context_used: Option<u64>,
@@ -178,7 +177,6 @@ impl Session {
         title: String,
         project_path: PathBuf,
         tool: Tool,
-        group: Option<String>,
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let command = tool.default_command().to_string();
@@ -192,7 +190,6 @@ impl Session {
             command,
             tool,
             status: Status::Dead,
-            group,
             tmux_name,
             created_at: Utc::now(),
             context_used: None,
@@ -245,35 +242,6 @@ impl Session {
 }
 
 // ---------------------------------------------------------------------------
-// Group
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Group {
-    pub name: String,
-
-    #[serde(default = "default_expanded")]
-    pub expanded: bool,
-
-    #[serde(default)]
-    pub order: u16,
-}
-
-fn default_expanded() -> bool {
-    true
-}
-
-impl Group {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            expanded: true,
-            order: 0,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -320,7 +288,6 @@ mod tests {
             "test".into(),
             PathBuf::from("/tmp/project"),
             Tool::Claude,
-            None,
         );
         assert_eq!(s.status, Status::Dead);
         assert_eq!(s.context_limit, 200_000);
@@ -333,7 +300,6 @@ mod tests {
             "test".into(),
             PathBuf::from("/tmp"),
             Tool::Claude,
-            None,
         );
         assert!(s.context_percentage().is_none());
 
@@ -348,7 +314,6 @@ mod tests {
             "My Cool Project".into(),
             PathBuf::from("/tmp"),
             Tool::Claude,
-            None,
         );
         // Should use the tmux::client::sanitize_session_name format.
         assert!(s.tmux_name.starts_with("agentick_"));

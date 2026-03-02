@@ -432,7 +432,6 @@ mod tests {
             command: tool.default_command().into(),
             tool,
             status: super::super::instance::Status::Active,
-            group: None,
             tmux_name: "agentick_test".into(),
             created_at: chrono::Utc::now(),
             context_used: None,

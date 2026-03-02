@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+use std::path::Path;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::session::instance::{Group, Session, Status};
+use crate::session::instance::{Session, Status};
 use crate::tui::app::FocusPane;
 use crate::tui::theme::{dark_theme, status_color, tool_color, Theme};
 
@@ -14,7 +17,7 @@ use crate::tui::theme::{dark_theme, status_color, tool_color, Theme};
 
 enum DisplayItem<'a> {
     GroupHeader {
-        name: &'a str,
+        name: String,
         count: usize,
         expanded: bool,
     },
@@ -30,14 +33,14 @@ enum DisplayItem<'a> {
 
 /// Render the main dashboard into `area`.
 ///
-/// * `sessions`      -- all sessions (will be filtered by `status_filter`).
-/// * `groups`        -- group definitions (ordering / expand state).
-/// * `selected`      -- cursor index in the flattened display list.
-/// * `status_filter` -- if `Some`, only sessions with this status are shown.
+/// * `sessions`       -- all sessions (will be filtered by `status_filter`).
+/// * `collapsed_dirs` -- set of project paths whose groups are collapsed.
+/// * `selected`       -- cursor index in the flattened display list.
+/// * `status_filter`  -- if `Some`, only sessions with this status are shown.
 pub fn render_dashboard(
     frame: &mut Frame,
     sessions: &[Session],
-    groups: &[Group],
+    collapsed_dirs: &HashSet<String>,
     selected: usize,
     status_filter: Option<&str>,
     preview_content: Option<&Text<'static>>,
@@ -75,7 +78,7 @@ pub fn render_dashboard(
         })
         .collect();
 
-    let items = build_display_items(&filtered, groups);
+    let items = build_display_items(&filtered, collapsed_dirs);
 
     // --- Render session list (with optional preview pane) -----------------
 
@@ -90,7 +93,7 @@ pub fn render_dashboard(
 
         render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme);
         render_preview_pane(
-            frame, sessions, groups, selected, status_filter, preview_content,
+            frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
@@ -196,29 +199,50 @@ fn render_top_bar(
 }
 
 // ---------------------------------------------------------------------------
-// Build flattened display list
+// Build flattened display list (auto-grouped by project_path)
 // ---------------------------------------------------------------------------
+
+/// Extract the directory display name from a project path.
+fn dir_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| path.to_str().unwrap_or("unknown"))
+        .to_string()
+}
 
 fn build_display_items<'a>(
     sessions: &[&'a Session],
-    groups: &'a [Group],
+    collapsed_dirs: &HashSet<String>,
 ) -> Vec<DisplayItem<'a>> {
     let mut items: Vec<DisplayItem<'a>> = Vec::new();
 
-    // Sessions that belong to a defined group.
-    for group in groups {
-        let group_sessions: Vec<&&Session> = sessions
+    // Collect unique project paths preserving first-seen order.
+    let mut seen = HashSet::new();
+    let mut paths: Vec<String> = Vec::new();
+    for s in sessions {
+        let key = s.project_path.to_string_lossy().to_string();
+        if seen.insert(key.clone()) {
+            paths.push(key);
+        }
+    }
+
+    for path_key in &paths {
+        let group_sessions: Vec<&'a Session> = sessions
             .iter()
-            .filter(|s| s.group.as_deref() == Some(&group.name))
+            .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
+            .copied()
             .collect();
 
+        let display_name = dir_display_name(Path::new(path_key));
+        let expanded = !collapsed_dirs.contains(path_key);
+
         items.push(DisplayItem::GroupHeader {
-            name: &group.name,
+            name: display_name,
             count: group_sessions.len(),
-            expanded: group.expanded,
+            expanded,
         });
 
-        if group.expanded {
+        if expanded {
             let last_idx = group_sessions.len().saturating_sub(1);
             for (i, sess) in group_sessions.iter().enumerate() {
                 items.push(DisplayItem::SessionRow {
@@ -226,32 +250,6 @@ fn build_display_items<'a>(
                     is_last: i == last_idx,
                 });
             }
-        }
-    }
-
-    // Ungrouped sessions.
-    let ungrouped: Vec<&&Session> = sessions
-        .iter()
-        .filter(|s| {
-            s.group.is_none()
-                || !groups
-                    .iter()
-                    .any(|g| Some(g.name.as_str()) == s.group.as_deref())
-        })
-        .collect();
-
-    if !ungrouped.is_empty() {
-        items.push(DisplayItem::GroupHeader {
-            name: "ungrouped",
-            count: ungrouped.len(),
-            expanded: true,
-        });
-        let last_idx = ungrouped.len().saturating_sub(1);
-        for (i, sess) in ungrouped.iter().enumerate() {
-            items.push(DisplayItem::SessionRow {
-                session: sess,
-                is_last: i == last_idx,
-            });
         }
     }
 
@@ -288,14 +286,14 @@ fn render_session_list(
                     lines.push(Line::from(""));
                 }
 
-                // Group header: arrow + lowercase name + (count)
+                // Group header: arrow + folder emoji + dirname + (count)
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(" {} ", arrow),
                         Style::default().fg(theme.accent),
                     ),
                     Span::styled(
-                        name.to_string(),
+                        format!("\u{1F5C3}\u{FE0F}  {}", name),
                         Style::default().fg(theme.accent),
                     ),
                     Span::styled(
@@ -326,7 +324,7 @@ fn render_session_list(
                 // Tree connector
                 let connector = if *is_last { " \u{2514}\u{2500} " } else { " \u{251C}\u{2500} " };
 
-                let mut spans = vec![
+                let spans = vec![
                     Span::styled(
                         connector,
                         Style::default()
@@ -349,35 +347,6 @@ fn render_session_list(
                     ),
                 ];
 
-                // Context bar -- only if data available
-                if let Some(pct) = session.context_percentage() {
-                    let filled = (pct / 10.0).round() as usize;
-                    let empty = 10_usize.saturating_sub(filled);
-
-                    let bar_color = if pct > 80.0 {
-                        theme.red
-                    } else if pct > 60.0 {
-                        theme.yellow
-                    } else {
-                        theme.green
-                    };
-
-                    spans.push(Span::styled("  [", Style::default().fg(theme.text_dim)));
-                    if filled > 0 {
-                        spans.push(Span::styled(
-                            "\u{2588}".repeat(filled),
-                            Style::default().fg(bar_color),
-                        ));
-                    }
-                    spans.push(Span::styled(
-                        "\u{2591}".repeat(empty),
-                        Style::default().fg(theme.text_dim),
-                    ));
-                    spans.push(Span::styled(
-                        format!("] {:.0}%", pct),
-                        Style::default().fg(theme.text_dim),
-                    ));
-                }
 
                 let line = Line::from(spans);
                 ListItem::new(vec![line])
@@ -415,7 +384,7 @@ fn render_session_list(
 /// out of range.
 fn find_selected_session<'a>(
     sessions: &'a [Session],
-    groups: &'a [Group],
+    collapsed_dirs: &HashSet<String>,
     selected: usize,
     status_filter: Option<&str>,
 ) -> Option<&'a Session> {
@@ -428,7 +397,7 @@ fn find_selected_session<'a>(
         })
         .collect();
 
-    let items = build_display_items(&filtered, groups);
+    let items = build_display_items(&filtered, collapsed_dirs);
     match items.get(selected) {
         Some(DisplayItem::SessionRow { session, .. }) => Some(session),
         _ => None,
@@ -442,7 +411,7 @@ fn find_selected_session<'a>(
 fn render_preview_pane(
     frame: &mut Frame,
     sessions: &[Session],
-    groups: &[Group],
+    collapsed_dirs: &HashSet<String>,
     selected: usize,
     status_filter: Option<&str>,
     preview_content: Option<&Text<'static>>,
@@ -452,7 +421,7 @@ fn render_preview_pane(
     area: Rect,
     theme: &Theme,
 ) {
-    let selected_session = find_selected_session(sessions, groups, selected, status_filter);
+    let selected_session = find_selected_session(sessions, collapsed_dirs, selected, status_filter);
     let is_focused = focus == FocusPane::Right;
 
     let border_color = if is_focused {
@@ -656,10 +625,10 @@ fn render_help_bar(frame: &mut Frame, focus: FocusPane, area: Rect, theme: &Them
 // ---------------------------------------------------------------------------
 
 /// Return the total number of display items (group headers + visible session
-/// rows) for the given sessions and groups. Useful for clamping the cursor.
+/// rows) for the given sessions and collapsed dirs. Useful for clamping the cursor.
 pub fn display_item_count(
     sessions: &[Session],
-    groups: &[Group],
+    collapsed_dirs: &HashSet<String>,
     status_filter: Option<&str>,
 ) -> usize {
     let filtered: Vec<&Session> = sessions
@@ -671,5 +640,5 @@ pub fn display_item_count(
         })
         .collect();
 
-    build_display_items(&filtered, groups).len()
+    build_display_items(&filtered, collapsed_dirs).len()
 }

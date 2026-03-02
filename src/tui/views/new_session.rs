@@ -29,23 +29,21 @@ pub const TOOL_OPTIONS: &[(&str, &str)] = &[
 const MAX_DIR_RESULTS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogField { Tool, Directory, Title, Group }
+pub enum DialogField { Tool, Directory, Title }
 
 impl DialogField {
     fn next(&self) -> Self {
         match self {
             Self::Tool => Self::Directory,
             Self::Directory => Self::Title,
-            Self::Title => Self::Group,
-            Self::Group => Self::Tool,
+            Self::Title => Self::Tool,
         }
     }
     fn prev(&self) -> Self {
         match self {
-            Self::Tool => Self::Group,
+            Self::Tool => Self::Title,
             Self::Directory => Self::Tool,
             Self::Title => Self::Directory,
-            Self::Group => Self::Title,
         }
     }
 }
@@ -68,7 +66,6 @@ pub struct NewSessionDialog {
     pub dir_selected: usize,
     dir_confirmed: bool,
     pub title: String,
-    pub group: String,
 }
 
 impl NewSessionDialog {
@@ -81,7 +78,6 @@ impl NewSessionDialog {
             dir_selected: 0,
             dir_confirmed: false,
             title: String::new(),
-            group: String::new(),
         }
     }
 
@@ -106,12 +102,11 @@ impl NewSessionDialog {
         match self.focus {
             DialogField::Tool => self.handle_tool_key(key),
             DialogField::Directory => self.handle_dir_key(key),
-            DialogField::Title => Self::handle_text_key(&mut self.title, key),
-            DialogField::Group => {
+            DialogField::Title => {
                 if key.code == KeyCode::Enter {
                     return self.try_create();
                 }
-                Self::handle_text_key(&mut self.group, key)
+                Self::handle_text_key(&mut self.title, key)
             }
         }
     }
@@ -174,8 +169,7 @@ impl NewSessionDialog {
         } else {
             self.title.clone()
         };
-        let group = if self.group.is_empty() { None } else { Some(self.group.clone()) };
-        DialogAction::Create(Session::new(title, path, Tool::from_command(cmd), group))
+        DialogAction::Create(Session::new(title, path, Tool::from_command(cmd)))
     }
 
     fn resolved_path(&self) -> Option<PathBuf> {
@@ -202,9 +196,9 @@ impl NewSessionDialog {
 pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, area: Rect) {
     let theme = dark_theme();
 
-    // Center the dialog: 60% width, 20 lines tall.
+    // Center the dialog: 60% width, 18 lines tall.
     let w = (area.width * 60 / 100).max(40).min(area.width);
-    let h = 20u16.min(area.height);
+    let h = 18u16.min(area.height);
     let vert = Layout::default().direction(Direction::Vertical).constraints([
         Constraint::Length((area.height.saturating_sub(h)) / 2),
         Constraint::Length(h),
@@ -234,7 +228,6 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
         Constraint::Length(3), // Directory input
         Constraint::Length(5), // Directory results
         Constraint::Length(3), // Title
-        Constraint::Length(3), // Group
         Constraint::Min(0),   // spacer
         Constraint::Length(1), // footer
     ]).split(inner);
@@ -243,7 +236,6 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
     render_dir_input(frame, dialog, rows[1], &theme);
     render_dir_results(frame, dialog, rows[2], &theme);
     render_text_field(frame, "Title", &dialog.title, None, dialog.focus == DialogField::Title, rows[3], &theme);
-    render_text_field(frame, "Group", &dialog.group, Some("optional"), dialog.focus == DialogField::Group, rows[4], &theme);
 
     let footer = Line::from(vec![
         Span::styled("Tab", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
@@ -253,7 +245,7 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
         Span::styled("Esc", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled(": cancel", Style::default().fg(theme.text_dim)),
     ]);
-    frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme.surface)), rows[6]);
+    frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme.surface)), rows[5]);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,15 +3,14 @@ use color_eyre::Result;
 use std::path::PathBuf;
 
 use crate::config::Config;
-use super::instance::{Group, Session};
+use super::instance::Session;
 
-/// Persistent store for sessions and groups.
+/// Persistent store for sessions.
 ///
 /// Serialised as JSON in `~/.agentick/sessions.json`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
 pub struct SessionStore {
     pub sessions: Vec<Session>,
-    pub groups: Vec<Group>,
 }
 
 impl SessionStore {
@@ -70,22 +69,5 @@ impl SessionStore {
     /// Find a session by id (mutable).
     pub fn find_session_mut(&mut self, id: &str) -> Option<&mut Session> {
         self.sessions.iter_mut().find(|s| s.id == id)
-    }
-
-    /// Add a group if one with the same name does not already exist.
-    pub fn add_group(&mut self, group: Group) {
-        if !self.groups.iter().any(|g| g.name == group.name) {
-            self.groups.push(group);
-        }
-    }
-
-    /// Toggle a group's expanded/collapsed state. Returns the new state.
-    pub fn toggle_group(&mut self, name: &str) -> Option<bool> {
-        if let Some(g) = self.groups.iter_mut().find(|g| g.name == name) {
-            g.expanded = !g.expanded;
-            Some(g.expanded)
-        } else {
-            None
-        }
     }
 }
