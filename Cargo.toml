@@ -1,0 +1,32 @@
+[package]
+name = "agentick"
+version = "0.1.0"
+edition = "2024"
+description = "Beautiful TUI session manager for AI coding agents"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+nucleo-matcher = "0.3"
+strip-ansi-escapes = "0.2"
+dirs = "6"
+color-eyre = "0.6"
+vt100 = "0.15"
+tui-term = "0.2"
+ansi-to-tui = "7.0"
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

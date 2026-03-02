@@ -1,0 +1,516 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use color_eyre::eyre::{Context, eyre};
+use color_eyre::Result;
+
+/// Default timeout for tmux subprocess calls on the hot path (tick / event loop).
+const TMUX_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Spawn a tmux command and wait for its output with a timeout.
+///
+/// If the subprocess doesn't finish within `timeout`, it is killed and an
+/// error is returned.  This prevents a hung tmux from freezing the UI.
+fn tmux_output_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
+    let mut child = Command::new("tmux")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .wrap_err_with(|| format!("failed to spawn tmux {}", args.first().unwrap_or(&"?")))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(eyre!(
+                        "tmux {} timed out after {:.1}s",
+                        args.first().unwrap_or(&"?"),
+                        timeout.as_secs_f64()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(eyre!("error waiting for tmux: {e}")),
+        }
+    }
+
+    child
+        .wait_with_output()
+        .wrap_err("failed to read tmux output")
+}
+
+/// Metadata about a running tmux session.
+#[derive(Debug, Clone)]
+pub struct TmuxSessionInfo {
+    pub name: String,
+    pub created: i64,
+    pub last_activity: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `tmux` is found on `$PATH` and responds to `--version`.
+pub fn tmux_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Create a new detached tmux session.
+///
+/// Equivalent to: `tmux new-session -d -s <name> -c <dir> <cmd>`
+pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["new-session", "-d", "-s", name, "-c"])
+        .arg(dir)
+        .arg(cmd)
+        .output()
+        .wrap_err("failed to spawn tmux new-session")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux new-session failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Kill an existing tmux session.
+///
+/// Equivalent to: `tmux kill-session -t <name>`
+pub fn kill_session(name: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["kill-session", "-t", name])
+        .output()
+        .wrap_err("failed to spawn tmux kill-session")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux kill-session failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Check whether a tmux session with the given name exists.
+///
+/// Equivalent to: `tmux has-session -t <name>`
+pub fn session_exists(name: &str) -> Result<bool> {
+    let status = Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .wrap_err("failed to spawn tmux has-session")?;
+
+    Ok(status.success())
+}
+
+/// Capture the visible content of a session's current pane.
+///
+/// Equivalent to: `tmux capture-pane -t <name> -p`
+pub fn capture_pane(name: &str) -> Result<String> {
+    let output = tmux_output_timeout(&["capture-pane", "-t", name, "-p"], TMUX_TIMEOUT)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux capture-pane failed: {}", stderr.trim()));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Send keystrokes to a tmux session, followed by Enter.
+///
+/// Equivalent to: `tmux send-keys -t <name> <keys> Enter`
+pub fn send_keys(name: &str, keys: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["send-keys", "-t", name, keys, "Enter"])
+        .output()
+        .wrap_err("failed to spawn tmux send-keys")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux send-keys failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Capture the visible content of a session's current pane, preserving ANSI escape codes.
+///
+/// Equivalent to: `tmux capture-pane -t <name> -p -e`
+pub fn capture_pane_ansi(name: &str) -> Result<String> {
+    let output =
+        tmux_output_timeout(&["capture-pane", "-t", name, "-p", "-e"], TMUX_TIMEOUT)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux capture-pane -e failed: {}", stderr.trim()));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Capture the full scrollback + visible content of a session's pane,
+/// preserving ANSI escape codes.
+///
+/// Equivalent to: `tmux capture-pane -t <name> -p -e -S -32768`
+pub fn capture_pane_scrollback(name: &str) -> Result<String> {
+    // Scrollback can be large — allow a longer timeout.
+    let output = tmux_output_timeout(
+        &["capture-pane", "-t", name, "-p", "-e", "-S", "-32768"],
+        Duration::from_secs(5),
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux capture-pane scrollback failed: {}", stderr.trim()));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Send literal keystrokes to a tmux session WITHOUT appending Enter.
+/// Fire-and-forget: spawns the process without blocking on output.
+///
+/// Equivalent to: `tmux send-keys -t <name> -l <keys>`
+pub fn send_keys_raw(name: &str, keys: &str) -> Result<()> {
+    Command::new("tmux")
+        .args(["send-keys", "-t", name, "-l", keys])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .wrap_err("failed to spawn tmux send-keys -l")?;
+    Ok(())
+}
+
+/// Send a special (non-literal) key to a tmux session.
+/// Fire-and-forget: spawns the process without blocking on output.
+///
+/// Equivalent to: `tmux send-keys -t <name> <key_name>`
+pub fn send_keys_special(name: &str, key_name: &str) -> Result<()> {
+    Command::new("tmux")
+        .args(["send-keys", "-t", name, key_name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .wrap_err("failed to spawn tmux send-keys (special)")?;
+    Ok(())
+}
+
+/// Attach to a tmux session in the foreground, inheriting stdin/stdout/stderr.
+///
+/// This blocks until the user detaches or the session ends.
+///
+/// Equivalent to: `tmux attach-session -t <name>`
+pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
+    let status = Command::new("tmux")
+        .args(["attach-session", "-t", name])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .wrap_err("failed to spawn tmux attach-session")?;
+
+    Ok(status)
+}
+
+/// List all running tmux sessions.
+///
+/// Equivalent to:
+/// `tmux list-sessions -F "#{session_name}\t#{session_created}\t#{window_activity}"`
+pub fn list_sessions() -> Result<Vec<TmuxSessionInfo>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{session_created}\t#{window_activity}",
+        ])
+        .output()
+        .wrap_err("failed to spawn tmux list-sessions")?;
+
+    // tmux exits non-zero when the server isn't running (no sessions).
+    // Treat that as an empty list rather than an error.
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut sessions = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let name = parts[0].to_string();
+        let created = parts[1].parse::<i64>().unwrap_or(0);
+        let last_activity = parts[2].parse::<i64>().unwrap_or(0);
+
+        sessions.push(TmuxSessionInfo {
+            name,
+            created,
+            last_activity,
+        });
+    }
+
+    Ok(sessions)
+}
+
+/// Get the latest window-activity timestamp for a specific session.
+///
+/// Uses `tmux list-windows` rather than `list-sessions` so we get
+/// per-window activity resolution.
+pub fn get_window_activity(name: &str) -> Result<i64> {
+    let output = Command::new("tmux")
+        .args([
+            "list-windows",
+            "-t",
+            name,
+            "-F",
+            "#{window_activity}",
+        ])
+        .output()
+        .wrap_err("failed to spawn tmux list-windows")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux list-windows failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // A session can have multiple windows; return the most recent activity.
+    let max_ts = stdout
+        .lines()
+        .filter_map(|line| line.trim().parse::<i64>().ok())
+        .max()
+        .unwrap_or(0);
+
+    Ok(max_ts)
+}
+
+// ---------------------------------------------------------------------------
+// Batch helpers (performance)
+// ---------------------------------------------------------------------------
+
+/// Fetch window-activity timestamps for **all** sessions in a single
+/// subprocess call.
+///
+/// Returns a map of `session_name -> latest_window_activity`.  When a session
+/// has multiple windows the highest (most recent) timestamp wins.
+///
+/// Equivalent to:
+/// `tmux list-windows -a -F "#{session_name}\t#{window_activity}"`
+pub fn refresh_activity_cache() -> Result<HashMap<String, i64>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_activity}",
+        ])
+        .output()
+        .wrap_err("failed to spawn tmux list-windows -a")?;
+
+    // No tmux server running → empty map.
+    if !output.status.success() {
+        return Ok(HashMap::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map: HashMap<String, i64> = HashMap::new();
+
+    for line in stdout.lines() {
+        let Some((session_name, ts_str)) = line.split_once('\t') else {
+            continue;
+        };
+        let ts = ts_str.trim().parse::<i64>().unwrap_or(0);
+
+        map.entry(session_name.to_string())
+            .and_modify(|existing| {
+                if ts > *existing {
+                    *existing = ts;
+                }
+            })
+            .or_insert(ts);
+    }
+
+    Ok(map)
+}
+
+/// Fetch activity timestamps, pane titles, AND pane dimensions for **all**
+/// sessions in a single subprocess call.
+///
+/// Returns `(activity_cache, pane_title_cache, pane_size_cache)`.
+///
+/// Equivalent to:
+/// `tmux list-panes -a -F "#{session_name}\t#{window_activity}\t#{pane_title}\t#{pane_width}\t#{pane_height}"`
+pub fn refresh_all_pane_data() -> Result<(HashMap<String, i64>, HashMap<String, String>, HashMap<String, (u16, u16)>)> {
+    let output = tmux_output_timeout(
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_activity}\t#{pane_title}\t#{pane_width}\t#{pane_height}",
+        ],
+        TMUX_TIMEOUT,
+    )?;
+
+    if !output.status.success() {
+        return Ok((HashMap::new(), HashMap::new(), HashMap::new()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut activity: HashMap<String, i64> = HashMap::new();
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut sizes: HashMap<String, (u16, u16)> = HashMap::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(5, '\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let session_name = parts[0].to_string();
+        let ts = parts[1].trim().parse::<i64>().unwrap_or(0);
+        let title = parts[2].to_string();
+
+        activity
+            .entry(session_name.clone())
+            .and_modify(|existing| {
+                if ts > *existing {
+                    *existing = ts;
+                }
+            })
+            .or_insert(ts);
+
+        titles.entry(session_name.clone()).or_insert(title);
+
+        // Parse pane dimensions if available.
+        if parts.len() >= 5 {
+            let width = parts[3].trim().parse::<u16>().unwrap_or(80);
+            let height = parts[4].trim().parse::<u16>().unwrap_or(24);
+            sizes.entry(session_name).or_insert((width, height));
+        }
+    }
+
+    Ok((activity, titles, sizes))
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Build a tmux-safe session name from a human-readable title and a unique id.
+///
+/// Format: `agentick_{sanitized_title}_{first_8_chars_of_id}`
+///
+/// Rules applied to *title*:
+/// - Lowercased
+/// - Non-alphanumeric characters replaced with `-`
+/// - Consecutive `-` collapsed into one
+/// - Leading/trailing `-` stripped
+/// - Truncated to at most 30 characters
+pub fn sanitize_session_name(title: &str, id: &str) -> String {
+    let sanitized_title: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+
+    // Collapse consecutive dashes and trim leading/trailing dashes.
+    let mut collapsed = String::with_capacity(sanitized_title.len());
+    let mut prev_dash = true; // start true to strip leading dash
+    for c in sanitized_title.chars() {
+        if c == '-' {
+            if !prev_dash {
+                collapsed.push('-');
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+
+    // Strip trailing dash.
+    let collapsed = collapsed.trim_end_matches('-');
+
+    // Truncate to 30 chars (at a dash boundary if possible).
+    let truncated = if collapsed.len() > 30 {
+        let slice = &collapsed[..30];
+        // Try to cut at the last dash so we don't chop mid-word.
+        match slice.rfind('-') {
+            Some(pos) if pos > 10 => &slice[..pos],
+            _ => slice,
+        }
+    } else {
+        collapsed
+    };
+
+    let id_prefix: String = id.chars().take(8).collect();
+
+    format!("agentick_{}_{}", truncated, id_prefix)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_basic() {
+        let name = sanitize_session_name("My Cool Project", "abcdef1234567890");
+        assert_eq!(name, "agentick_my-cool-project_abcdef12");
+    }
+
+    #[test]
+    fn sanitize_special_chars() {
+        let name = sanitize_session_name("hello!@#world$$$test", "aabb1122");
+        assert_eq!(name, "agentick_hello-world-test_aabb1122");
+    }
+
+    #[test]
+    fn sanitize_long_title() {
+        let long_title = "a]very-long-title-that-exceeds-the-thirty-character-limit-significantly";
+        let name = sanitize_session_name(long_title, "deadbeef");
+        // Title portion should be at most 30 chars.
+        let prefix = "agentick_";
+        let suffix = "_deadbeef";
+        let title_portion = &name[prefix.len()..name.len() - suffix.len()];
+        assert!(title_portion.len() <= 30, "title portion too long: {title_portion}");
+    }
+
+    #[test]
+    fn sanitize_empty_title() {
+        let name = sanitize_session_name("", "12345678");
+        assert_eq!(name, "agentick__12345678");
+    }
+
+    #[test]
+    fn sanitize_short_id() {
+        let name = sanitize_session_name("test", "abc");
+        assert_eq!(name, "agentick_test_abc");
+    }
+}
