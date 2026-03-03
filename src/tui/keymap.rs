@@ -39,6 +39,12 @@ pub fn map_key(key: &KeyEvent) -> TmuxKey {
         return TmuxKey::RawHex("1b 5b 31 33 3b 32 75".into());
     }
 
+    // Shift+Space → send CSI u so Claude receives the modifier.
+    if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Char(' ') {
+        // ESC [ 3 2 ; 2 u  →  1b 5b 33 32 3b 32 75
+        return TmuxKey::RawHex("1b 5b 33 32 3b 32 75".into());
+    }
+
     match key.code {
         KeyCode::Char(c) => TmuxKey::Literal(c.to_string()),
         KeyCode::Enter => TmuxKey::Special("Enter".into()),

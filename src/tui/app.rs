@@ -1145,13 +1145,13 @@ impl App {
         // Ensure the status bar is hidden (covers sessions created before this fix).
         let _ = tmux::set_option(&tmux_name, "status", "off");
 
-        // Leave TUI alternate screen, clear the host terminal so no stale
-        // content (e.g. cargo build output) leaks through before tmux takes
-        // over, then attach.
+        // Leave TUI alternate screen and disable mouse capture, but keep
+        // keyboard enhancement active so the outer terminal keeps sending
+        // modifier info (Kitty/xterm protocol). tmux needs this to detect
+        // Shift+Enter and re-encode it as CSI u for Claude.
         let _ = disable_raw_mode();
         let _ = execute!(
             stdout(),
-            crossterm::event::PopKeyboardEnhancementFlags,
             crossterm::event::DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -1161,17 +1161,13 @@ impl App {
         // Attach (blocking).
         let _ = tmux::attach_session(&tmux_name);
 
-        // Re-enter TUI alternate screen and re-enable mouse capture +
-        // keyboard enhancement so Shift+Enter etc. work in interactive mode.
+        // Re-enter TUI alternate screen and re-enable mouse capture.
+        // Keyboard enhancement was never popped so no push needed.
         let _ = enable_raw_mode();
         let _ = execute!(
             stdout(),
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
         );
         self.needs_clear = true;
     }

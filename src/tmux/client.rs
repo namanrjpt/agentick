@@ -90,6 +90,19 @@ pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
         .args(["set-option", "-s", "extended-keys", "always"])
         .output();
 
+    // Use CSI u encoding (e.g. \x1b[13;2u for Shift+Enter) instead of the
+    // default xterm format (\x1b[27;2;13~) which Claude CLI doesn't understand.
+    // Requires tmux 3.5+; silently ignored on older versions.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-s", "extended-keys-format", "csi-u"])
+        .output();
+
+    // Tell tmux the outer terminal supports extended keys so it decodes
+    // modifier information from the terminal emulator.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
+        .output();
+
     let output = Command::new("tmux")
         .args(["new-session", "-d", "-s", name, "-c"])
         .arg(dir)
@@ -317,6 +330,12 @@ pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
     // Ensure extended-keys is on so Shift+Enter etc. work in the session.
     let _ = Command::new("tmux")
         .args(["set-option", "-s", "extended-keys", "always"])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-s", "extended-keys-format", "csi-u"])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
         .output();
 
     let status = Command::new("tmux")

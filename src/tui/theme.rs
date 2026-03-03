@@ -21,7 +21,7 @@ pub struct Theme {
 pub fn dark_theme() -> Theme {
     Theme {
         bg: Color::Rgb(0x00, 0x00, 0x00),
-        surface: Color::Rgb(0x12, 0x12, 0x12),
+        surface: Color::Rgb(0x28, 0x34, 0x57),
         border: Color::Rgb(0x3b, 0x42, 0x61),
         border_focused: Color::Rgb(0x7a, 0xa2, 0xf7),
         text: Color::Rgb(0xc0, 0xca, 0xf5),

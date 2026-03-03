@@ -100,7 +100,10 @@ pub fn render_dashboard(
         })
         .collect();
 
-    let items = build_display_items(&filtered, collapsed_dirs);
+    // Derive stable group ordering from the full (unfiltered) session list so
+    // that folders don't jump around when sessions change status or filters apply.
+    let canonical_paths = canonical_group_order(sessions);
+    let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
 
     // --- Render session list (with optional preview pane) -----------------
 
@@ -250,21 +253,33 @@ fn dir_display_name(path: &Path) -> String {
         .to_string()
 }
 
-fn build_display_items<'a>(
-    sessions: &[&'a Session],
-    collapsed_dirs: &HashSet<String>,
-) -> Vec<DisplayItem<'a>> {
-    let mut items: Vec<DisplayItem<'a>> = Vec::new();
-
-    // Collect unique project paths preserving first-seen order.
+/// Derive a stable group ordering from the full (unfiltered) session list.
+/// Groups appear in the order their first session was added to the store.
+fn canonical_group_order(sessions: &[Session]) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut paths: Vec<String> = Vec::new();
+    let mut paths = Vec::new();
     for s in sessions {
         let key = s.project_path.to_string_lossy().to_string();
         if seen.insert(key.clone()) {
             paths.push(key);
         }
     }
+    paths
+}
+
+fn build_display_items<'a>(
+    sessions: &[&'a Session],
+    collapsed_dirs: &HashSet<String>,
+    canonical_paths: &[String],
+) -> Vec<DisplayItem<'a>> {
+    let mut items: Vec<DisplayItem<'a>> = Vec::new();
+
+    // Use the canonical (insertion-order) path list so groups never reorder.
+    // Only emit groups that have at least one session in the filtered set.
+    let paths: Vec<&String> = canonical_paths
+        .iter()
+        .filter(|p| sessions.iter().any(|s| s.project_path.to_string_lossy() == p.as_str()))
+        .collect();
 
     for path_key in &paths {
         let group_sessions: Vec<&'a Session> = sessions
@@ -273,9 +288,9 @@ fn build_display_items<'a>(
             .copied()
             .collect();
 
-        let path = Path::new(path_key);
+        let path = Path::new(path_key.as_str());
         let display_name = dir_display_name(path);
-        let expanded = !collapsed_dirs.contains(path_key);
+        let expanded = !collapsed_dirs.contains(path_key.as_str());
         let branch = git_branch(path);
 
         items.push(DisplayItem::GroupHeader {
@@ -521,7 +536,8 @@ fn render_session_list(
                 .bg(theme.surface)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("\u{258E} ");
+        .highlight_symbol("\u{258C} ")
+        .repeat_highlight_symbol(true);
 
     let mut state = ListState::default();
     if !items.is_empty() {
@@ -553,7 +569,8 @@ fn find_selected_session<'a>(
         })
         .collect();
 
-    let items = build_display_items(&filtered, collapsed_dirs);
+    let canonical_paths = canonical_group_order(sessions);
+    let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
     match items.get(selected) {
         Some(DisplayItem::SessionRow { session, .. }) => Some(session),
         _ => None,
@@ -888,5 +905,6 @@ pub fn display_item_count(
         })
         .collect();
 
-    build_display_items(&filtered, collapsed_dirs).len()
+    let canonical_paths = canonical_group_order(sessions);
+    build_display_items(&filtered, collapsed_dirs, &canonical_paths).len()
 }
