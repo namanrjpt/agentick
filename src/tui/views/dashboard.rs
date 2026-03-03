@@ -70,6 +70,7 @@ pub fn render_dashboard(
     focus: FocusPane,
     tick_count: u32,
     area: Rect,
+    rename_state: Option<(&str, &str)>, // (session_id, buffer)
 ) {
     let theme = dark_theme();
 
@@ -112,13 +113,13 @@ pub fn render_dashboard(
             ])
             .split(chunks[1]);
 
-        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme);
+        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
-        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme);
+        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -338,6 +339,7 @@ fn render_session_list(
     tick_count: u32,
     area: Rect,
     theme: &Theme,
+    rename_state: Option<(&str, &str)>, // (session_id, buffer)
 ) {
     let list_items: Vec<ListItem> = items
         .iter()
@@ -422,7 +424,16 @@ fn render_session_list(
                 let has_bar = session.context_percentage().is_some();
                 let bar_reserved = if has_bar { 1 + bar_w + 1 } else { 0 }; // " ████████ "
                 let max_title = (area.width as usize).saturating_sub(prefix_w + bar_reserved);
-                let title_display = if session.title.len() > max_title && max_title > 3 {
+
+                // Check if this session is being renamed inline.
+                let is_renaming = rename_state
+                    .map(|(rid, _)| rid == session.id)
+                    .unwrap_or(false);
+
+                let title_display = if is_renaming {
+                    let buf = rename_state.unwrap().1;
+                    format!("{}\u{2588}", buf) // buffer + block cursor
+                } else if session.title.len() > max_title && max_title > 3 {
                     let mut t: String = session.title.chars().take(max_title - 3).collect();
                     t.push_str("...");
                     t
@@ -449,12 +460,16 @@ fn render_session_list(
                         Style::default().fg(tool_color(&tool_str)),
                     ));
                 }
-                spans.push(Span::styled(
-                    title_display.clone(),
+                let title_style = if is_renaming {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
                     Style::default()
                         .fg(theme.text)
-                        .add_modifier(Modifier::BOLD),
-                ));
+                        .add_modifier(Modifier::BOLD)
+                };
+                spans.push(Span::styled(title_display.clone(), title_style));
 
                 // Context bar: 4 chars, filled count + color by bucket
                 //   <25% → 1 white  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
@@ -837,6 +852,8 @@ fn render_help_bar(frame: &mut Frame, focus: FocusPane, area: Rect, theme: &Them
             Span::styled("/ ", key_style),
             Span::styled("search  ", dim_style),
             Span::styled("r ", key_style),
+            Span::styled("rename  ", dim_style),
+            Span::styled("R ", key_style),
             Span::styled("refresh  ", dim_style),
             Span::styled("Tab ", key_style),
             Span::styled("filter  ", dim_style),

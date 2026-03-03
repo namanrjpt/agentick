@@ -53,6 +53,10 @@ pub enum AppMode {
     QuickCreate {
         project_path: PathBuf,
     },
+    Rename {
+        session_id: String,
+        buf: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +196,12 @@ impl App {
             self.focus = FocusPane::Left;
         }
 
+        // Extract rename state for dashboard rendering.
+        let rename_state = match &self.mode {
+            AppMode::Rename { session_id, buf } => Some((session_id.as_str(), buf.as_str())),
+            _ => None,
+        };
+
         // Always render the dashboard underneath.
         dashboard::render_dashboard(
             frame,
@@ -205,6 +215,7 @@ impl App {
             self.focus,
             self.frame_count,
             area,
+            rename_state,
         );
 
         // Render modal overlays on top.
@@ -236,7 +247,7 @@ impl App {
             AppMode::QuickCreate { project_path } => {
                 dashboard::render_quick_create_sheet(frame, project_path, area);
             }
-            AppMode::Normal => {}
+            AppMode::Normal | AppMode::Rename { .. } => {}
         }
     }
 
@@ -340,6 +351,9 @@ impl App {
             AppMode::Search { .. } => {
                 self.handle_search_key(key);
             }
+            AppMode::Rename { .. } => {
+                self.handle_rename_key(key);
+            }
         }
     }
 
@@ -394,6 +408,14 @@ impl App {
                 self.toggle_selected_group(true);
             }
             KeyCode::Char('r') => {
+                if let Some(id) = self.selected_session_id() {
+                    self.mode = AppMode::Rename {
+                        session_id: id,
+                        buf: String::new(),
+                    };
+                }
+            }
+            KeyCode::Char('R') => {
                 self.preview_stale = true;
                 self.scroll_cache = None;
                 self.scroll_capture_handle = None;
@@ -567,7 +589,9 @@ impl App {
             if let Some(handle) = self.summary_handles.remove(&id) {
                 if let Ok((sid, Some(summary))) = handle.join() {
                     if let Some(session) = self.store.find_session_mut(&sid) {
-                        session.title = summary;
+                        if !session.user_renamed {
+                            session.title = summary;
+                        }
                     }
                     let _ = self.store.save();
                 }
@@ -602,7 +626,7 @@ impl App {
 
         let session = match self.selected_session_id() {
             Some(id) => match self.store.sessions.iter().find(|s| s.id == id) {
-                Some(s) if supports_auto_title(&s.tool) && s.title.is_empty() => s.clone(),
+                Some(s) if supports_auto_title(&s.tool) && s.title.is_empty() && !s.user_renamed => s.clone(),
                 _ => return,
             },
             None => return,
@@ -636,7 +660,7 @@ impl App {
 
         let session = match self.selected_session_id() {
             Some(id) => match self.store.sessions.iter().find(|s| s.id == id) {
-                Some(s) if supports_auto_title(&s.tool) && !self.summary_handles.contains_key(&s.id) => s.clone(),
+                Some(s) if supports_auto_title(&s.tool) && !s.user_renamed && !self.summary_handles.contains_key(&s.id) => s.clone(),
                 _ => return,
             },
             None => return,
@@ -1015,6 +1039,37 @@ impl App {
         let _ = self.store.save();
 
         self.mode = AppMode::Normal;
+    }
+
+    // --- Inline rename ------------------------------------------------------
+
+    fn handle_rename_key(&mut self, key: KeyEvent) {
+        let (session_id, buf) = match &mut self.mode {
+            AppMode::Rename { session_id, buf } => (session_id.clone(), buf),
+            _ => return,
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Enter => {
+                let new_title = buf.trim().to_string();
+                if let Some(session) = self.store.find_session_mut(&session_id) {
+                    session.title = new_title;
+                    session.user_renamed = true;
+                }
+                let _ = self.store.save();
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) => {
+                buf.push(c);
+            }
+            _ => {}
+        }
     }
 
     // --- Fork --------------------------------------------------------------

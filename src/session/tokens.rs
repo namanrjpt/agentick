@@ -1227,6 +1227,7 @@ mod tests {
             cost_usd: None,
             last_activity: None,
             forked_from: None,
+            user_renamed: false,
         }
     }
 

@@ -175,6 +175,11 @@ pub struct Session {
     /// If this session was forked from another, the parent agentick session ID.
     #[serde(default)]
     pub forked_from: Option<String>,
+
+    /// Whether the user manually renamed this session. When true, auto-title
+    /// (first-message placeholder and LLM summary) is skipped.
+    #[serde(default)]
+    pub user_renamed: bool,
 }
 
 fn default_context_limit() -> u64 {
@@ -208,6 +213,7 @@ impl Session {
             cost_usd: None,
             last_activity: None,
             forked_from: None,
+            user_renamed: false,
         }
     }
 
