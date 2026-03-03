@@ -6,10 +6,29 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use unicode_width::UnicodeWidthStr;
+
+use std::path::PathBuf;
 
 use crate::session::instance::{Session, Status};
 use crate::tui::app::FocusPane;
 use crate::tui::theme::{dark_theme, status_color, tool_color, Theme};
+
+// ---------------------------------------------------------------------------
+// Quick-create key map
+// ---------------------------------------------------------------------------
+
+/// (key, display_label, command_name) for the which-key quick-create sheet.
+pub const QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
+    ('c', "Claude", "claude"),
+    ('x', "Codex", "codex"),
+    ('g', "Gemini", "gemini"),
+    ('r', "Cursor", "cursor"),
+    ('v', "Vibe", "vibe"),
+    ('a', "Aider", "aider"),
+    ('s', "Shell", "shell"),
+    ('o', "OpenCode", "opencode"),
+];
 
 // ---------------------------------------------------------------------------
 // Display item -- either a group header or a session row in the flat list
@@ -20,10 +39,12 @@ enum DisplayItem<'a> {
         name: String,
         count: usize,
         expanded: bool,
+        branch: Option<String>,
     },
     SessionRow {
         session: &'a Session,
         is_last: bool,
+        is_fork: bool,
     },
 }
 
@@ -86,8 +107,8 @@ pub fn render_dashboard(
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(80),
+                Constraint::Percentage(25),
+                Constraint::Percentage(75),
             ])
             .split(chunks[1]);
 
@@ -202,6 +223,24 @@ fn render_top_bar(
 // Build flattened display list (auto-grouped by project_path)
 // ---------------------------------------------------------------------------
 
+/// Read the current git branch for a directory by parsing `.git/HEAD`.
+///
+/// Returns `None` if the path is not a git repo.  For detached HEAD,
+/// returns the first 7 characters of the commit hash.
+fn git_branch(path: &Path) -> Option<String> {
+    let head = path.join(".git/HEAD");
+    let content = std::fs::read_to_string(head).ok()?;
+    let content = content.trim();
+    if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+        Some(branch.to_string())
+    } else if content.len() >= 7 {
+        // Detached HEAD — show short hash
+        Some(content.chars().take(7).collect())
+    } else {
+        None
+    }
+}
+
 /// Extract the directory display name from a project path.
 fn dir_display_name(path: &Path) -> String {
     path.file_name()
@@ -233,22 +272,54 @@ fn build_display_items<'a>(
             .copied()
             .collect();
 
-        let display_name = dir_display_name(Path::new(path_key));
+        let path = Path::new(path_key);
+        let display_name = dir_display_name(path);
         let expanded = !collapsed_dirs.contains(path_key);
+        let branch = git_branch(path);
 
         items.push(DisplayItem::GroupHeader {
             name: display_name,
             count: group_sessions.len(),
             expanded,
+            branch,
         });
 
         if expanded {
-            let last_idx = group_sessions.len().saturating_sub(1);
-            for (i, sess) in group_sessions.iter().enumerate() {
+            // Separate top-level sessions (no parent) from forks.
+            let top_level: Vec<&'a Session> = group_sessions
+                .iter()
+                .filter(|s| s.forked_from.is_none())
+                .copied()
+                .collect();
+            let top_last_idx = top_level.len().saturating_sub(1);
+
+            for (i, sess) in top_level.iter().enumerate() {
+                // Collect forks of this session within this group.
+                let forks: Vec<&'a Session> = group_sessions
+                    .iter()
+                    .filter(|s| s.forked_from.as_deref() == Some(&sess.id))
+                    .copied()
+                    .collect();
+
+                let has_forks = !forks.is_empty();
+                // Parent is "last" in tree only if it's the last top-level
+                // AND has no forks (forks extend the subtree).
+                let parent_is_last = i == top_last_idx && !has_forks;
+
                 items.push(DisplayItem::SessionRow {
                     session: sess,
-                    is_last: i == last_idx,
+                    is_last: parent_is_last,
+                    is_fork: false,
                 });
+
+                let fork_last_idx = forks.len().saturating_sub(1);
+                for (fi, fork) in forks.iter().enumerate() {
+                    items.push(DisplayItem::SessionRow {
+                        session: fork,
+                        is_last: fi == fork_last_idx,
+                        is_fork: true,
+                    });
+                }
             }
         }
     }
@@ -276,6 +347,7 @@ fn render_session_list(
                 name,
                 count,
                 expanded,
+                branch,
             } => {
                 let arrow = if *expanded { "\u{25BC}" } else { "\u{25B6}" };
 
@@ -286,8 +358,8 @@ fn render_session_list(
                     lines.push(Line::from(""));
                 }
 
-                // Group header: arrow + folder emoji + dirname + (count)
-                lines.push(Line::from(vec![
+                // Group header: arrow + folder emoji + dirname + (count) ... branch
+                let mut spans = vec![
                     Span::styled(
                         format!(" {} ", arrow),
                         Style::default().fg(theme.accent),
@@ -302,11 +374,21 @@ fn render_session_list(
                             .fg(theme.text_dim)
                             .add_modifier(Modifier::DIM),
                     ),
-                ]));
+                ];
+
+                // Git branch after the count
+                if let Some(br) = branch {
+                    spans.push(Span::styled(
+                        format!("  \u{f418} {}", br),
+                        Style::default().fg(theme.purple),
+                    ));
+                }
+
+                lines.push(Line::from(spans));
 
                 ListItem::new(lines)
             }
-            DisplayItem::SessionRow { session, is_last } => {
+            DisplayItem::SessionRow { session, is_last, is_fork } => {
                 let status_str = session.status.to_string();
                 let tool_str = session.tool.to_string();
 
@@ -321,10 +403,34 @@ fn render_session_list(
                     (session.status.indicator(), status_color(&status_str))
                 };
 
-                // Tree connector
-                let connector = if *is_last { " \u{2514}\u{2500} " } else { " \u{251C}\u{2500} " };
+                // Tree connector — forks align └─ with parent title's left edge
+                // Parent layout: connector(4) + indicator(2) + tool(9) = 15 cols before title
+                let connector = if *is_fork {
+                    // 15 spaces to reach title column, then └─ + space
+                    if *is_last { "               \u{2514}\u{2500} " } else { "               \u{251C}\u{2500} " }
+                } else {
+                    if *is_last { " \u{2514}\u{2500} " } else { " \u{251C}\u{2500} " }
+                };
 
-                let spans = vec![
+                // Layout: highlight(2) + connector + indicator(2) [+ tool(9) if not fork] + title
+                let prefix_w = if *is_fork {
+                    2 + 18 + 2  // 15 pad + 3 (└─ ) + indicator, no tool
+                } else {
+                    2 + 4 + 2 + 9
+                };
+                let bar_w: usize = 4;
+                let has_bar = session.context_percentage().is_some();
+                let bar_reserved = if has_bar { 1 + bar_w + 1 } else { 0 }; // " ████████ "
+                let max_title = (area.width as usize).saturating_sub(prefix_w + bar_reserved);
+                let title_display = if session.title.len() > max_title && max_title > 3 {
+                    let mut t: String = session.title.chars().take(max_title - 3).collect();
+                    t.push_str("...");
+                    t
+                } else {
+                    session.title.clone()
+                };
+
+                let mut spans = vec![
                     Span::styled(
                         connector,
                         Style::default()
@@ -335,18 +441,53 @@ fn render_session_list(
                         format!("{} ", indicator_char),
                         Style::default().fg(indicator_color),
                     ),
-                    Span::styled(
+                ];
+                // Skip tool name for forks — it's always the same as the parent.
+                if !*is_fork {
+                    spans.push(Span::styled(
                         format!("{:<8} ", tool_str),
                         Style::default().fg(tool_color(&tool_str)),
-                    ),
-                    Span::styled(
-                        session.title.clone(),
-                        Style::default()
-                            .fg(theme.text)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
+                    ));
+                }
+                spans.push(Span::styled(
+                    title_display.clone(),
+                    Style::default()
+                        .fg(theme.text)
+                        .add_modifier(Modifier::BOLD),
+                ));
 
+                // Context bar: 4 chars, filled count + color by bucket
+                //   <25% → 1 white  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
+                if let Some(pct) = session.context_percentage() {
+                    let (filled, color) = if pct >= 75.0 {
+                        (4, theme.red)
+                    } else if pct >= 50.0 {
+                        (3, theme.yellow)
+                    } else if pct >= 25.0 {
+                        (2, theme.green)
+                    } else {
+                        (1, theme.text_dim)
+                    };
+                    let empty = bar_w - filled;
+
+                    // Right-align the bar
+                    let used_w = prefix_w + title_display.len();
+                    let bar_col = (area.width as usize).saturating_sub(bar_w + 1);
+                    let gap = bar_col.saturating_sub(used_w);
+                    if gap > 0 {
+                        spans.push(Span::raw(" ".repeat(gap)));
+                    }
+                    spans.push(Span::styled(
+                        "\u{2501}".repeat(filled),
+                        Style::default().fg(color),
+                    ));
+                    if empty > 0 {
+                        spans.push(Span::styled(
+                            "\u{2501}".repeat(empty),
+                            Style::default().fg(theme.text_dim).add_modifier(Modifier::DIM),
+                        ));
+                    }
+                }
 
                 let line = Line::from(spans);
                 ListItem::new(vec![line])
@@ -462,7 +603,9 @@ fn render_preview_pane(
 
             let all_lines = &styled_text.lines;
             let max_lines = area.height.saturating_sub(2) as usize;
-            let end = all_lines.len().saturating_sub(preview_scroll);
+            // Clamp: never scroll past the top of history.
+            let clamped_scroll = preview_scroll.min(all_lines.len().saturating_sub(max_lines));
+            let end = all_lines.len().saturating_sub(clamped_scroll);
             let start = end.saturating_sub(max_lines);
             let visible_lines = all_lines[start..end].to_vec();
 
@@ -577,6 +720,88 @@ pub fn render_confirm_dialog(frame: &mut Frame, message: &str, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Quick-create bottom sheet
+// ---------------------------------------------------------------------------
+
+/// Render a 3-line which-key overlay anchored to the bottom of the screen.
+pub fn render_quick_create_sheet(frame: &mut Frame, project_path: &Path, area: Rect) {
+    let theme = dark_theme();
+
+    let sheet_height: u16 = 3;
+    let y = area.height.saturating_sub(sheet_height);
+    let sheet_area = Rect::new(area.x, y, area.width, sheet_height);
+
+    frame.render_widget(Clear, sheet_area);
+
+    let dir_name = project_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    // Line 1: title + dirname
+    let mut line1_spans = vec![
+        Span::styled(
+            " Quick Create ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("in {}", dir_name),
+            Style::default().fg(theme.text_dim),
+        ),
+    ];
+    // Pad to fill width
+    let line1_len: usize = line1_spans.iter().map(|s| s.content.len()).sum();
+    if (area.width as usize) > line1_len {
+        line1_spans.push(Span::raw(" ".repeat(area.width as usize - line1_len)));
+    }
+
+    // Line 2: key-action pairs
+    let mut line2_spans: Vec<Span> = vec![Span::raw(" ")];
+    for (key, label, cmd) in QUICK_CREATE_KEYS {
+        line2_spans.push(Span::styled(
+            format!("{}", key),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        line2_spans.push(Span::styled(
+            format!(" {} ", label),
+            Style::default().fg(tool_color(cmd)),
+        ));
+        line2_spans.push(Span::styled(" ", Style::default().fg(theme.text_dim)));
+    }
+
+    // Line 3: cancel / full dialog hints
+    let line3_spans = vec![
+        Span::styled(
+            " Esc ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("cancel  ", Style::default().fg(theme.text_dim)),
+        Span::styled(
+            "N ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("full dialog", Style::default().fg(theme.text_dim)),
+    ];
+
+    let text = Text::from(vec![
+        Line::from(line1_spans),
+        Line::from(line2_spans),
+        Line::from(line3_spans),
+    ]);
+
+    let para = Paragraph::new(text).style(Style::default().bg(theme.surface));
+    frame.render_widget(para, sheet_area);
+}
+
+// ---------------------------------------------------------------------------
 // Help bar
 // ---------------------------------------------------------------------------
 
@@ -598,19 +823,25 @@ fn render_help_bar(frame: &mut Frame, focus: FocusPane, area: Rect, theme: &Them
     } else {
         vec![
             Span::styled(" n ", key_style),
-            Span::styled("new  ", dim_style),
+            Span::styled("quick new  ", dim_style),
+            Span::styled("N ", key_style),
+            Span::styled("new session  ", dim_style),
             Span::styled("d ", key_style),
             Span::styled("delete  ", dim_style),
             Span::styled("K ", key_style),
             Span::styled("kill  ", dim_style),
+            Span::styled("f ", key_style),
+            Span::styled("fork  ", dim_style),
             Span::styled("` ", key_style),
             Span::styled("interact  ", dim_style),
             Span::styled("/ ", key_style),
             Span::styled("search  ", dim_style),
+            Span::styled("r ", key_style),
+            Span::styled("refresh  ", dim_style),
             Span::styled("Tab ", key_style),
             Span::styled("filter  ", dim_style),
             Span::styled("Enter ", key_style),
-            Span::styled("attach  ", dim_style),
+            Span::styled("attach (Ctrl+q detach)  ", dim_style),
             Span::styled("q ", key_style),
             Span::styled("quit", dim_style),
         ]

@@ -131,14 +131,20 @@ pub fn detect_status(ctx: &DetectionContext) -> DetectionResult {
         let elapsed = ctx.now.duration_since(changed_at);
 
         // Sustained activity: 2+ consecutive timestamp changes within 3s.
-        if ctx.sustained_activity_count >= 2 && elapsed < Duration::from_secs(3) {
+        // Exclude tools with TUI cursor blink (Vibe, Cursor) since their
+        // blinking cursor produces continuous activity even when idle.
+        let has_tui_blink = matches!(ctx.tool, Tool::Vibe | Tool::Cursor);
+        if !has_tui_blink
+            && ctx.sustained_activity_count >= 2
+            && elapsed < Duration::from_secs(3)
+        {
             return DetectionResult {
                 status: Status::Active,
                 spinner_seen: false,
             };
         }
 
-        if elapsed < Duration::from_secs(300) {
+        if elapsed < Duration::from_secs(60) {
             return DetectionResult {
                 status: Status::Done,
                 spinner_seen: false,
@@ -205,6 +211,15 @@ fn has_busy_indicator(tool: &Tool, lines: &[&str]) -> bool {
             let lower = line.to_lowercase();
             lower.contains("thinking...") || lower.contains("generating...")
         }),
+        Tool::Vibe => {
+            // Vibe uses a SnakeSpinner (braille-rendered) in its loading widget.
+            // The generic braille check above covers it, but also look for the
+            // loading indicator combined with tool execution text.
+            lines.iter().any(|line| {
+                let lower = line.to_lowercase();
+                lower.contains("running") || lower.contains("executing")
+            })
+        }
         _ => false,
     }
 }
@@ -249,6 +264,23 @@ fn has_prompt_indicator(tool: &Tool, lines: &[&str]) -> bool {
             lower.contains("ask anything") || lower.contains("press enter to send")
         }
         Tool::Aider => last_line == ">" || last_line.starts_with("> "),
+        Tool::Vibe => {
+            // Vibe (Textual TUI) shows an approval dialog or a chat input area.
+            // Approval dialog: "↑↓ navigate  Enter select  ESC reject"
+            let has_approval = lines_lower.iter().any(|l| {
+                (l.contains("navigate") && l.contains("enter select"))
+                    || l.contains("yes and always allow")
+                    || l.contains("no and tell the agent")
+            });
+            if has_approval {
+                return true;
+            }
+            // Vibe is a Textual TUI — if it's not showing a braille spinner
+            // (caught by Layer 3 busy check above), it's at the chat input
+            // with a blinking cursor, i.e. waiting for user input.
+            let full = lines.join(" ");
+            !has_braille_spinner(&full)
+        }
         _ => {
             // Generic: shell prompts, continuation prompts.
             // Note: last_line is trim()'d so trailing space is gone.
@@ -470,5 +502,76 @@ mod tests {
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Waiting);
+    }
+
+    // -- Vibe detection -----------------------------------------------------
+
+    #[test]
+    fn vibe_idle_no_spinner_is_waiting() {
+        // Vibe showing chat input with no braille spinner → Waiting.
+        let ctx = DetectionContext {
+            tool: &Tool::Vibe,
+            pane_title: None,
+            pane_content: Some("Assistant: Here is the answer.\n\n"),
+            hook_status: None,
+            activity_changed_at: Some(Instant::now()),
+            spinner_last_seen: None,
+            sustained_activity_count: 10, // high sustained count from cursor blink
+            now: Instant::now(),
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Waiting);
+    }
+
+    #[test]
+    fn vibe_spinner_is_active() {
+        // Vibe showing braille snake spinner → Active.
+        let ctx = DetectionContext {
+            tool: &Tool::Vibe,
+            pane_title: None,
+            pane_content: Some("Working on it\n\u{280B} loading..."),
+            hook_status: None,
+            activity_changed_at: Some(Instant::now()),
+            spinner_last_seen: None,
+            sustained_activity_count: 5,
+            now: Instant::now(),
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Active);
+    }
+
+    #[test]
+    fn vibe_approval_is_waiting() {
+        // Vibe showing approval dialog → Waiting.
+        let ctx = DetectionContext {
+            tool: &Tool::Vibe,
+            pane_title: None,
+            pane_content: Some("Tool: write_file\n1. Yes\n2. Yes and always allow write_file for this session\n3. No and tell the agent what to do instead\n↑↓ navigate  Enter select  ESC reject"),
+            hook_status: None,
+            activity_changed_at: Some(Instant::now()),
+            spinner_last_seen: None,
+            sustained_activity_count: 5,
+            now: Instant::now(),
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Waiting);
+    }
+
+    #[test]
+    fn vibe_timestamp_only_not_active() {
+        // Vibe with high sustained activity but no content capture →
+        // should NOT be Active (cursor blink excluded from Layer 5).
+        let ctx = DetectionContext {
+            tool: &Tool::Vibe,
+            pane_title: None,
+            pane_content: None,
+            hook_status: None,
+            activity_changed_at: Some(Instant::now()),
+            spinner_last_seen: None,
+            sustained_activity_count: 20,
+            now: Instant::now(),
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Done);
     }
 }

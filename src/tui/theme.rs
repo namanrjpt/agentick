@@ -74,6 +74,7 @@ pub fn tool_color(tool: &str) -> Color {
         "opencode" => t.accent,
         "cursor" => t.green,
         "aider" => t.yellow,
+        "vibe" => t.red,
         "shell" => t.text_dim,
         _ => t.text,
     }

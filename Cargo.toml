@@ -21,6 +21,7 @@ color-eyre = "0.6"
 vt100 = "0.15"
 tui-term = "0.2"
 ansi-to-tui = "7.0"
+unicode-width = "0.2"
 
 [dev-dependencies]
 insta = "1"

@@ -72,7 +72,24 @@ pub fn tmux_available() -> bool {
 /// Create a new detached tmux session.
 ///
 /// Equivalent to: `tmux new-session -d -s <name> -c <dir> <cmd>`
+///
+/// Also disables the tmux status bar, clears any shell init output from the
+/// scrollback, and sets `history-limit` so that only agent output is visible.
 pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
+    // Set global history-limit BEFORE creating the session. tmux applies
+    // history-limit at pane creation time, so setting it after new-session
+    // has no effect on the pane that was already created.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-g", "history-limit", "50000"])
+        .output();
+
+    // Enable extended-keys so tmux passes modifier information (e.g.
+    // Shift+Enter) through to the application running inside the pane.
+    // Without this, Shift+Enter is indistinguishable from plain Enter.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-s", "extended-keys", "always"])
+        .output();
+
     let output = Command::new("tmux")
         .args(["new-session", "-d", "-s", name, "-c"])
         .arg(dir)
@@ -83,6 +100,59 @@ pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!("tmux new-session failed: {}", stderr.trim()));
+    }
+
+    // Hide the tmux status bar — agentick provides its own UI chrome.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "status", "off"])
+        .output();
+
+    // Enable mouse mode so that scroll events in the attached session go to
+    // tmux (scrolling through pane history) rather than the outer terminal
+    // (which would show stale "previous terminal" content).
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", name, "mouse", "on"])
+        .output();
+
+
+    // Clear any shell init / .zshrc output that accumulated before the
+    // command started, so scrollback only contains actual agent output.
+    let _ = Command::new("tmux")
+        .args(["clear-history", "-t", name])
+        .output();
+
+    Ok(())
+}
+
+/// Set a tmux option on a session.
+///
+/// Equivalent to: `tmux set-option -t <name> <option> <value>`
+pub fn set_option(name: &str, option: &str, value: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-t", name, option, value])
+        .output()
+        .wrap_err("failed to spawn tmux set-option")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux set-option failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Clear the scrollback history of a session's pane.
+///
+/// Equivalent to: `tmux clear-history -t <name>`
+pub fn clear_history(name: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["clear-history", "-t", name])
+        .output()
+        .wrap_err("failed to spawn tmux clear-history")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux clear-history failed: {}", stderr.trim()));
     }
 
     Ok(())
@@ -199,6 +269,25 @@ pub fn send_keys_raw(name: &str, keys: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send raw hex bytes to a tmux session's pane.
+/// Fire-and-forget: spawns the process without blocking on output.
+///
+/// `hex` should be space-separated hex pairs, e.g. `"1b 5b 31 33 3b 32 75"`.
+/// Equivalent to: `tmux send-keys -t <name> -H <hex_pairs...>`
+pub fn send_keys_hex(name: &str, hex: &str) -> Result<()> {
+    let mut args = vec!["send-keys", "-t", name, "-H"];
+    let pairs: Vec<&str> = hex.split_whitespace().collect();
+    args.extend(pairs.iter());
+    Command::new("tmux")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .wrap_err("failed to spawn tmux send-keys -H")?;
+    Ok(())
+}
+
 /// Send a special (non-literal) key to a tmux session.
 /// Fire-and-forget: spawns the process without blocking on output.
 ///
@@ -217,9 +306,19 @@ pub fn send_keys_special(name: &str, key_name: &str) -> Result<()> {
 /// Attach to a tmux session in the foreground, inheriting stdin/stdout/stderr.
 ///
 /// This blocks until the user detaches or the session ends.
-///
-/// Equivalent to: `tmux attach-session -t <name>`
+/// Ctrl+d is bound to detach before attaching (instead of the default
+/// Ctrl+b d) for a simpler UX.
 pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
+    // Bind Ctrl+q to detach in the root key table (no prefix needed).
+    let _ = Command::new("tmux")
+        .args(["bind-key", "-n", "C-q", "detach-client"])
+        .output();
+
+    // Ensure extended-keys is on so Shift+Enter etc. work in the session.
+    let _ = Command::new("tmux")
+        .args(["set-option", "-s", "extended-keys", "always"])
+        .output();
+
     let status = Command::new("tmux")
         .args(["attach-session", "-t", name])
         .stdin(std::process::Stdio::inherit())
@@ -227,6 +326,12 @@ pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
         .stderr(std::process::Stdio::inherit())
         .status()
         .wrap_err("failed to spawn tmux attach-session")?;
+
+    // Remove the root-table binding after detach so it doesn't leak into
+    // the user's normal tmux usage.
+    let _ = Command::new("tmux")
+        .args(["unbind-key", "-n", "C-q"])
+        .output();
 
     Ok(status)
 }

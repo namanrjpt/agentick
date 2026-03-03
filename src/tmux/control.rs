@@ -98,6 +98,20 @@ impl TmuxControlClient {
         self.write_cmd(&cmd)
     }
 
+    /// Send raw hex bytes to the tmux pane via `send-keys -H`.
+    ///
+    /// `hex` should be space-separated hex pairs, e.g. `"1b 5b 31 33 3b 32 75"`.
+    /// This bypasses tmux's key name / literal parsing entirely, writing raw
+    /// bytes directly to the pane's pty.  Useful for escape sequences that
+    /// contain ESC (0x1B) which would confuse `-l` in control mode.
+    pub fn send_keys_hex(&mut self, hex: &str) -> Result<()> {
+        if !self.is_alive() {
+            return Err(eyre!("control client is dead"));
+        }
+        let cmd = format!("send-keys -t {} -H {}\n", self.session_name, hex);
+        self.write_cmd(&cmd)
+    }
+
     /// Send a special key (Enter, Escape, Tab, etc.) to the tmux pane.
     ///
     /// Equivalent to `tmux send-keys -t <session> <key>` but via pipe.

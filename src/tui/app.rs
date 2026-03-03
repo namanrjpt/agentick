@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::stdout;
+use std::path::PathBuf;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
@@ -48,6 +50,29 @@ pub enum AppMode {
         filtered_indices: Vec<usize>,
         selected: usize,
     },
+    QuickCreate {
+        project_path: PathBuf,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Key normalisation
+// ---------------------------------------------------------------------------
+
+/// Normalise Kitty-protocol key events: Shift+lowercase → uppercase.
+///
+/// The Kitty keyboard protocol (`REPORT_ALL_KEYS_AS_ESCAPE_CODES`) reports
+/// Shift+N as `Char('n')` with `SHIFT` modifier instead of `Char('N')`.
+/// This converts to the traditional representation so match arms on uppercase
+/// characters (e.g. `KeyCode::Char('N')`) work regardless of protocol.
+fn normalize_shift_char(mut key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(c) = key.code {
+        if c.is_ascii_lowercase() && key.modifiers.contains(KeyModifiers::SHIFT) {
+            key.code = KeyCode::Char(c.to_ascii_uppercase());
+            key.modifiers.remove(KeyModifiers::SHIFT);
+        }
+    }
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +118,8 @@ pub struct App {
     last_preview_at: Instant,
     /// Cached styled text for scroll mode (captured once on scroll, not every frame).
     scroll_cache: Option<Text<'static>>,
+    /// Background thread capturing scrollback (so it doesn't block the event loop).
+    scroll_capture_handle: Option<JoinHandle<Option<String>>>,
     /// Styled preview content from capture-pane, refreshed on activity.
     preview_content: Option<Text<'static>>,
     /// Set when preview needs re-capture (output detected, cursor moved, etc).
@@ -101,6 +128,8 @@ pub struct App {
     token_cache: crate::session::tokens::TokenCache,
     /// Project paths whose auto-groups are collapsed (not persisted).
     collapsed_dirs: HashSet<String>,
+    /// Background threads generating LLM summaries for Claude session titles.
+    summary_handles: HashMap<String, JoinHandle<(String, Option<String>)>>,
 }
 
 impl App {
@@ -112,7 +141,7 @@ impl App {
         crate::session::tokens::refresh_all(&mut store.sessions, &mut token_cache);
         // Ensure hook handler script and Claude Code hook config are installed.
         crate::hooks::setup::ensure_hooks_installed();
-        Ok(Self {
+        let mut app = Self {
             store,
             selected: 0,
             should_quit: false,
@@ -138,11 +167,18 @@ impl App {
             last_keystroke_at: Instant::now() - Duration::from_secs(10),
             last_preview_at: Instant::now() - Duration::from_secs(10),
             scroll_cache: None,
+            scroll_capture_handle: None,
             preview_content: None,
             preview_stale: true,
             token_cache,
             collapsed_dirs: HashSet::new(),
-        })
+            summary_handles: HashMap::new(),
+        };
+        app.spawn_summary_threads();
+        // Run the first tick immediately so statuses are detected before the
+        // first frame is drawn, rather than waiting 500ms.
+        app.tick();
+        Ok(app)
     }
 
     /// Draw the current frame.
@@ -197,6 +233,9 @@ impl App {
             } => {
                 search::render_search_bar(frame, query, filtered_indices.len(), area);
             }
+            AppMode::QuickCreate { project_path } => {
+                dashboard::render_quick_create_sheet(frame, project_path, area);
+            }
             AppMode::Normal => {}
         }
     }
@@ -224,10 +263,17 @@ impl App {
         }
 
         // When right pane is focused in Normal mode, forward all keys to tmux.
+        // Use the raw (un-normalised) key so keymap.rs sees the original event.
         if self.focus == FocusPane::Right && matches!(self.mode, AppMode::Normal) {
             self.forward_key_to_tmux(key);
             return;
         }
+
+        // Normalise Kitty-protocol key events for TUI handling.
+        // The Kitty keyboard protocol (REPORT_ALL_KEYS_AS_ESCAPE_CODES) reports
+        // Shift+N as Char('n') + SHIFT instead of Char('N'). Normalise so that
+        // match arms on uppercase characters work correctly.
+        let key = normalize_shift_char(key);
 
         // Handle NewSession mode separately: take ownership of the dialog so we
         // can call handle_key(&mut dialog) without conflicting borrows on self.
@@ -260,6 +306,9 @@ impl App {
         match &self.mode {
             AppMode::Normal => self.handle_normal_key(key),
             AppMode::NewSession(_) => unreachable!(),
+            AppMode::QuickCreate { .. } => {
+                self.handle_quick_create_key(key);
+            }
             AppMode::ConfirmDelete(id) => {
                 let id = id.clone();
                 match key.code {
@@ -310,6 +359,11 @@ impl App {
                 self.attach_selected();
             }
             KeyCode::Char('n') => {
+                if let Some(path) = self.selected_project_path() {
+                    self.mode = AppMode::QuickCreate { project_path: path };
+                }
+            }
+            KeyCode::Char('N') => {
                 self.mode = AppMode::NewSession(Box::new(NewSessionDialog::new()));
             }
             KeyCode::Char('d') => {
@@ -338,6 +392,16 @@ impl App {
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 self.toggle_selected_group(true);
+            }
+            KeyCode::Char('r') => {
+                self.preview_stale = true;
+                self.scroll_cache = None;
+                self.scroll_capture_handle = None;
+                self.preview_scroll = 0;
+                self.refresh_preview_content();
+            }
+            KeyCode::Char('f') => {
+                self.fork_selected_session();
             }
             _ => {}
         }
@@ -384,7 +448,9 @@ impl App {
             let name = &session.tmux_name;
             if let Some(&current_ts) = self.activity_cache.get(name) {
                 let prev_ts = self.prev_activity.get(name).copied();
-                let changed = prev_ts.map(|p| p != current_ts).unwrap_or(true);
+                // First observation (prev_ts is None) is NOT a change — treat
+                // as baseline so sessions start as Idle, not Done.
+                let changed = prev_ts.map(|p| p != current_ts).unwrap_or(false);
 
                 if changed {
                     self.activity_changed_at.insert(name.clone(), now);
@@ -489,6 +555,101 @@ impl App {
         if self.tick_count % 10 == 0 {
             crate::session::tokens::refresh_all(&mut self.store.sessions, &mut self.token_cache);
         }
+
+        // Poll completed LLM summary threads.
+        let done_ids: Vec<String> = self
+            .summary_handles
+            .iter()
+            .filter(|(_, h)| h.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in done_ids {
+            if let Some(handle) = self.summary_handles.remove(&id) {
+                if let Ok((sid, Some(summary))) = handle.join() {
+                    if let Some(session) = self.store.find_session_mut(&sid) {
+                        session.title = summary;
+                    }
+                    let _ = self.store.save();
+                }
+            }
+        }
+
+        // Fast check: fill empty Claude titles with first user prompt (~5s cadence).
+        if self.tick_count % 10 == 0 {
+            self.fill_empty_titles();
+        }
+
+        // Spawn new LLM summary threads every ~2.5 min.
+        if self.tick_count % 300 == 0 {
+            self.spawn_summary_threads();
+        }
+    }
+
+    /// Spawn background threads to generate LLM summary titles for Claude sessions.
+    ///
+    /// Only spawns for sessions that don't already have a pending handle.
+    /// For Claude sessions with empty titles, immediately set the first user
+    /// prompt as a placeholder and spawn an LLM thread for a proper title.
+    /// Try to fill the title of the currently hovered session only.
+    ///
+    /// Sets the first user message as a placeholder, then spawns an LLM
+    /// thread for a proper summary title.
+    fn fill_empty_titles(&mut self) {
+        use crate::session::tokens::{
+            collect_context_for_tool, extract_first_user_message_for_tool,
+            generate_llm_summary, supports_auto_title,
+        };
+
+        let session = match self.selected_session_id() {
+            Some(id) => match self.store.sessions.iter().find(|s| s.id == id) {
+                Some(s) if supports_auto_title(&s.tool) && s.title.is_empty() => s.clone(),
+                _ => return,
+            },
+            None => return,
+        };
+
+        // Set first user message as placeholder title.
+        if let Some(msg) = extract_first_user_message_for_tool(&session) {
+            if let Some(s) = self.store.find_session_mut(&session.id) {
+                s.title = msg;
+            }
+        }
+
+        // Spawn LLM thread for a proper summary.
+        let session_id = session.id.clone();
+        if self.summary_handles.contains_key(&session_id) {
+            return;
+        }
+        let sid = session_id.clone();
+        let handle = std::thread::spawn(move || {
+            let result = collect_context_for_tool(&session)
+                .and_then(|ctx| generate_llm_summary(&ctx));
+            (sid, result)
+        });
+        self.summary_handles.insert(session_id, handle);
+    }
+
+    /// Spawn LLM summary threads for all Claude sessions to refresh titles.
+    /// Spawn an LLM summary thread for the currently hovered session only.
+    fn spawn_summary_threads(&mut self) {
+        use crate::session::tokens::{collect_context_for_tool, generate_llm_summary, supports_auto_title};
+
+        let session = match self.selected_session_id() {
+            Some(id) => match self.store.sessions.iter().find(|s| s.id == id) {
+                Some(s) if supports_auto_title(&s.tool) && !self.summary_handles.contains_key(&s.id) => s.clone(),
+                _ => return,
+            },
+            None => return,
+        };
+
+        let session_id = session.id.clone();
+        let sid = session_id.clone();
+        let handle = std::thread::spawn(move || {
+            let result = collect_context_for_tool(&session)
+                .and_then(|ctx| generate_llm_summary(&ctx));
+            (sid, result)
+        });
+        self.summary_handles.insert(session_id, handle);
     }
 
     /// Drain pending %output from control client. If any bytes arrived,
@@ -601,19 +762,56 @@ impl App {
 
     /// Snapshot scrollback content when entering scroll mode, drop it when
     /// returning to live view.  Called after processing scroll events.
+    ///
+    /// The actual `capture-pane -S` call runs in a background thread so it
+    /// never blocks the event loop.  Until the capture completes the preview
+    /// keeps showing live content; once it arrives the scroll_cache is
+    /// populated and scroll mode kicks in.
     fn update_scroll_cache(&mut self) {
-        if self.preview_scroll > 0 && self.scroll_cache.is_none() {
-            // Entering scroll mode — capture full scrollback history once.
-            if let Some(name) = self.selected_session_tmux_name() {
-                if let Ok(content) = tmux::capture_pane_scrollback(&name) {
+        if self.preview_scroll == 0 {
+            // Back to live view — drop everything.
+            self.scroll_cache = None;
+            self.scroll_capture_handle = None;
+            return;
+        }
+
+        // If the cache is already populated, just clamp the scroll position.
+        if let Some(ref text) = self.scroll_cache {
+            let total = text.lines.len();
+            if total > 0 && self.preview_scroll >= total {
+                self.preview_scroll = total - 1;
+            }
+            return;
+        }
+
+        // Check if a background capture has finished.
+        if let Some(handle) = self.scroll_capture_handle.take() {
+            if handle.is_finished() {
+                if let Ok(Some(content)) = handle.join() {
                     if let Ok(text) = content.as_bytes().into_text() {
                         self.scroll_cache = Some(text);
                     }
                 }
+                // Clamp after populating.
+                if let Some(ref text) = self.scroll_cache {
+                    let total = text.lines.len();
+                    if total > 0 && self.preview_scroll >= total {
+                        self.preview_scroll = total - 1;
+                    }
+                }
+            } else {
+                // Still running — put the handle back.
+                self.scroll_capture_handle = Some(handle);
             }
-        } else if self.preview_scroll == 0 {
-            // Back to live view — drop the cache.
-            self.scroll_cache = None;
+            return;
+        }
+
+        // No cache and no pending capture — kick off a background capture.
+        if let Some(name) = self.selected_session_tmux_name() {
+            let handle = std::thread::spawn(move || {
+                tmux::capture_pane_scrollback(&name).ok()
+            });
+            self.scroll_capture_handle = Some(handle);
         }
     }
 
@@ -633,6 +831,7 @@ impl App {
             self.selected += 1;
             self.preview_scroll = 0;
             self.scroll_cache = None;
+            self.scroll_capture_handle = None;
             self.preview_stale = true;
         }
     }
@@ -642,6 +841,7 @@ impl App {
             self.selected -= 1;
             self.preview_scroll = 0;
             self.scroll_cache = None;
+            self.scroll_capture_handle = None;
             self.preview_stale = true;
         }
     }
@@ -708,6 +908,162 @@ impl App {
         None
     }
 
+    /// Get the project path of the currently selected item, whether it's a
+    /// group header or a session row.
+    fn selected_project_path(&self) -> Option<PathBuf> {
+        let filtered: Vec<&crate::session::instance::Session> = self
+            .store
+            .sessions
+            .iter()
+            .filter(|s| {
+                self.status_filter
+                    .as_ref()
+                    .map(|f| s.status.to_string() == *f)
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        let mut seen = HashSet::new();
+        let mut paths: Vec<String> = Vec::new();
+        for s in &filtered {
+            let key = s.project_path.to_string_lossy().to_string();
+            if seen.insert(key.clone()) {
+                paths.push(key);
+            }
+        }
+
+        let mut idx: usize = 0;
+        for path_key in &paths {
+            let group_sessions: Vec<&&crate::session::instance::Session> = filtered
+                .iter()
+                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
+                .collect();
+
+            let expanded = !self.collapsed_dirs.contains(path_key);
+
+            // Group header
+            if idx == self.selected {
+                return Some(PathBuf::from(path_key));
+            }
+            idx += 1;
+
+            if expanded {
+                for sess in &group_sessions {
+                    if idx == self.selected {
+                        return Some(sess.project_path.clone());
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Handle key events in QuickCreate mode.
+    fn handle_quick_create_key(&mut self, key: KeyEvent) {
+        // N transitions to full dialog
+        if key.code == KeyCode::Char('N') {
+            self.mode = AppMode::NewSession(Box::new(NewSessionDialog::new()));
+            return;
+        }
+
+        // Esc cancels
+        if key.code == KeyCode::Esc {
+            self.mode = AppMode::Normal;
+            return;
+        }
+
+        let ch = match key.code {
+            KeyCode::Char(c) => c,
+            _ => {
+                self.mode = AppMode::Normal;
+                return;
+            }
+        };
+
+        // Look up the pressed char in QUICK_CREATE_KEYS
+        let entry = dashboard::QUICK_CREATE_KEYS
+            .iter()
+            .find(|(k, _, _)| *k == ch);
+
+        let (_key, _label, cmd) = match entry {
+            Some(e) => e,
+            None => {
+                // Unmapped key — cancel
+                self.mode = AppMode::Normal;
+                return;
+            }
+        };
+
+        // Extract project_path before overwriting mode
+        let project_path = match &self.mode {
+            AppMode::QuickCreate { project_path } => project_path.clone(),
+            _ => unreachable!(),
+        };
+
+        let tool = crate::session::instance::Tool::from_command(cmd);
+
+        let session =
+            crate::session::instance::Session::new(String::new(), project_path.clone(), tool);
+
+        // Spawn tmux session
+        let _ = tmux::create_session(&session.tmux_name, &session.project_path, &session.command);
+
+        // Add to store and save
+        self.store.add_session(session);
+        let _ = self.store.save();
+
+        self.mode = AppMode::Normal;
+    }
+
+    // --- Fork --------------------------------------------------------------
+
+    /// Fork the currently selected Claude session.
+    ///
+    /// Uses `claude --resume <uuid> --fork-session` to create a new Claude
+    /// session that inherits the parent's full conversation history.
+    fn fork_selected_session(&mut self) {
+        use crate::session::instance::Tool;
+        use crate::session::tokens::find_claude_jsonl;
+
+        let session_id = match self.selected_session_id() {
+            Some(id) => id,
+            None => return,
+        };
+
+        let parent = match self.store.find_session(&session_id) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        // Only Claude sessions can be forked.
+        if parent.tool != Tool::Claude {
+            return;
+        }
+
+        // Find the Claude JSONL file — its filename stem is the Claude session UUID.
+        let claude_uuid = match find_claude_jsonl(&parent) {
+            Some(path) => match path.file_stem().and_then(|s| s.to_str()) {
+                Some(stem) => stem.to_string(),
+                None => return,
+            },
+            None => return,
+        };
+
+        let mut forked = crate::session::instance::Session::new_fork(&parent);
+        forked.command = format!(
+            "claude --resume {} --fork-session --dangerously-skip-permissions",
+            claude_uuid
+        );
+
+        // Spawn the tmux session for the fork.
+        let _ = tmux::create_session(&forked.tmux_name, &forked.project_path, &forked.command);
+
+        self.store.add_session(forked);
+        let _ = self.store.save();
+    }
+
     // --- Attach -----------------------------------------------------------
 
     /// Attach to the selected session's tmux session.
@@ -731,16 +1087,37 @@ impl App {
             _ => return,
         }
 
-        // Leave TUI alternate screen.
+        // Ensure the status bar is hidden (covers sessions created before this fix).
+        let _ = tmux::set_option(&tmux_name, "status", "off");
+
+        // Leave TUI alternate screen, clear the host terminal so no stale
+        // content (e.g. cargo build output) leaks through before tmux takes
+        // over, then attach.
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            stdout(),
+            crossterm::event::PopKeyboardEnhancementFlags,
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::MoveTo(0, 0)
+        );
 
         // Attach (blocking).
         let _ = tmux::attach_session(&tmux_name);
 
-        // Re-enter TUI alternate screen and signal that a clear is needed.
+        // Re-enter TUI alternate screen and re-enable mouse capture +
+        // keyboard enhancement so Shift+Enter etc. work in interactive mode.
         let _ = enable_raw_mode();
-        let _ = execute!(stdout(), EnterAlternateScreen);
+        let _ = execute!(
+            stdout(),
+            EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
+        );
         self.needs_clear = true;
     }
 
@@ -756,8 +1133,30 @@ impl App {
         // Snap to live view when typing and mark preview stale.
         self.preview_scroll = 0;
         self.scroll_cache = None;
+        self.scroll_capture_handle = None;
         self.preview_stale = true;
         self.last_keystroke_at = Instant::now();
+
+        // Verify the control client is alive before attempting to use it.
+        // Without this check, a dead client silently swallows keystrokes
+        // until the next tick() (up to 500ms) detects the disconnect.
+        if let Some(ref mut client) = self.control_client {
+            if !client.is_alive() {
+                self.control_client = None;
+                self.control_session = None;
+            }
+        }
+
+        // If the control client is gone, try to reconnect immediately so the
+        // current keystroke can use the fast pipe path instead of subprocess.
+        if self.control_client.is_none() && self.focus == FocusPane::Right {
+            if self.activity_cache.contains_key(&tmux_name) {
+                if let Ok(client) = TmuxControlClient::attach(&tmux_name) {
+                    self.control_client = Some(client);
+                    self.control_session = Some(tmux_name.clone());
+                }
+            }
+        }
 
         match crate::tui::keymap::map_key(&key) {
             crate::tui::keymap::TmuxKey::Literal(text) => {
@@ -779,6 +1178,16 @@ impl App {
                 };
                 if !used_control {
                     let _ = tmux::send_keys_special(&tmux_name, &name);
+                }
+            }
+            crate::tui::keymap::TmuxKey::RawHex(hex) => {
+                let used_control = if let Some(ref mut client) = self.control_client {
+                    client.send_keys_hex(&hex).is_ok()
+                } else {
+                    false
+                };
+                if !used_control {
+                    let _ = tmux::send_keys_hex(&tmux_name, &hex);
                 }
             }
             crate::tui::keymap::TmuxKey::Ignore => {}
@@ -1017,6 +1426,11 @@ pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         if app.last_tick.elapsed() >= Duration::from_millis(500) {
             app.tick();
             app.last_tick = Instant::now();
+        }
+
+        // Check if a background scrollback capture has finished.
+        if app.scroll_capture_handle.is_some() {
+            app.update_scroll_cache();
         }
 
         if event::poll(poll_duration)? {

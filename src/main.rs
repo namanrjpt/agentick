@@ -26,9 +26,6 @@ enum Commands {
         /// Tool to use (claude, gemini, codex, opencode, cursor, aider, shell)
         #[arg(short, long, default_value = "claude")]
         tool: String,
-        /// Session title
-        #[arg(short = 'n', long)]
-        title: Option<String>,
     },
 }
 
@@ -44,17 +41,12 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Add { path, tool, title }) => {
+        Some(Commands::Add { path, tool }) => {
             let mut store = session::store::SessionStore::load()?;
             let tool = session::instance::Tool::from_command(&tool);
             let project_path = std::path::PathBuf::from(&path);
-            let title = title.unwrap_or_else(|| {
-                project_path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "untitled".to_string())
-            });
-            let session = session::instance::Session::new(title, project_path, tool);
-            println!("Created session: {} ({})", session.title, session.id);
+            let session = session::instance::Session::new(String::new(), project_path, tool);
+            println!("Created session: {}", session.id);
             store.add_session(session);
             store.save()?;
             Ok(())
@@ -67,15 +59,21 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
             // Enable mouse capture so scroll events go to the TUI, not the outer terminal.
+            // Enable keyboard enhancement so modifiers on Enter, etc. are detected.
             let _ = crossterm::execute!(
                 std::io::stdout(),
-                crossterm::event::EnableMouseCapture
+                crossterm::event::EnableMouseCapture,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                )
             );
             let mut terminal = ratatui::init();
             let result = tui::app::run(&mut terminal);
             ratatui::restore();
             let _ = crossterm::execute!(
                 std::io::stdout(),
+                crossterm::event::PopKeyboardEnhancementFlags,
                 crossterm::event::DisableMouseCapture
             );
             result

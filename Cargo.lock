@@ -37,6 +37,7 @@ dependencies = [
  "tokio",
  "toml",
  "tui-term",
+ "unicode-width 0.2.0",
  "uuid",
  "vt100",
 ]

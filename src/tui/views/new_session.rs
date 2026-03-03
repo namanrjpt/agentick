@@ -23,27 +23,26 @@ pub const TOOL_OPTIONS: &[(&str, &str)] = &[
     ("OpenCode", "opencode"),
     ("Cursor", "cursor"),
     ("Aider", "aider"),
+    ("Vibe", "vibe"),
     ("Shell", "shell"),
 ];
 
 const MAX_DIR_RESULTS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogField { Tool, Directory, Title }
+pub enum DialogField { Tool, Directory }
 
 impl DialogField {
     fn next(&self) -> Self {
         match self {
             Self::Tool => Self::Directory,
-            Self::Directory => Self::Title,
-            Self::Title => Self::Tool,
+            Self::Directory => Self::Tool,
         }
     }
     fn prev(&self) -> Self {
         match self {
-            Self::Tool => Self::Title,
+            Self::Tool => Self::Directory,
             Self::Directory => Self::Tool,
-            Self::Title => Self::Directory,
         }
     }
 }
@@ -65,7 +64,6 @@ pub struct NewSessionDialog {
     pub zoxide_dirs: Vec<zoxide::ZoxideEntry>,
     pub dir_selected: usize,
     dir_confirmed: bool,
-    pub title: String,
 }
 
 impl NewSessionDialog {
@@ -77,7 +75,6 @@ impl NewSessionDialog {
             zoxide_dirs: zoxide::load_zoxide_dirs(),
             dir_selected: 0,
             dir_confirmed: false,
-            title: String::new(),
         }
     }
 
@@ -102,12 +99,6 @@ impl NewSessionDialog {
         match self.focus {
             DialogField::Tool => self.handle_tool_key(key),
             DialogField::Directory => self.handle_dir_key(key),
-            DialogField::Title => {
-                if key.code == KeyCode::Enter {
-                    return self.try_create();
-                }
-                Self::handle_text_key(&mut self.title, key)
-            }
         }
     }
 
@@ -137,12 +128,7 @@ impl NewSessionDialog {
                 if let Some(path) = self.selected_dir_path() {
                     self.dir_query = path.clone();
                     self.dir_confirmed = true;
-                    if self.title.is_empty() {
-                        if let Some(b) = PathBuf::from(&path).file_name().and_then(|n| n.to_str()) {
-                            self.title = b.to_string();
-                        }
-                    }
-                    self.focus = DialogField::Title;
+                    return self.try_create();
                 }
             }
             KeyCode::Backspace => { self.dir_query.pop(); self.dir_selected = 0; self.dir_confirmed = false; }
@@ -152,24 +138,10 @@ impl NewSessionDialog {
         DialogAction::Continue
     }
 
-    fn handle_text_key(buf: &mut String, key: KeyEvent) -> DialogAction {
-        match key.code {
-            KeyCode::Backspace => { buf.pop(); }
-            KeyCode::Char(c) => buf.push(c),
-            _ => {}
-        }
-        DialogAction::Continue
-    }
-
     fn try_create(&self) -> DialogAction {
         let Some(path) = self.resolved_path() else { return DialogAction::Continue };
         let (_, cmd) = TOOL_OPTIONS[self.tool_index];
-        let title = if self.title.is_empty() {
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("session").to_string()
-        } else {
-            self.title.clone()
-        };
-        DialogAction::Create(Session::new(title, path, Tool::from_command(cmd)))
+        DialogAction::Create(Session::new(String::new(), path, Tool::from_command(cmd)))
     }
 
     fn resolved_path(&self) -> Option<PathBuf> {
@@ -227,7 +199,6 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
         Constraint::Length(3), // Tool
         Constraint::Length(3), // Directory input
         Constraint::Length(5), // Directory results
-        Constraint::Length(3), // Title
         Constraint::Min(0),   // spacer
         Constraint::Length(1), // footer
     ]).split(inner);
@@ -235,7 +206,6 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
     render_tool_field(frame, dialog, rows[0], &theme);
     render_dir_input(frame, dialog, rows[1], &theme);
     render_dir_results(frame, dialog, rows[2], &theme);
-    render_text_field(frame, "Title", &dialog.title, None, dialog.focus == DialogField::Title, rows[3], &theme);
 
     let footer = Line::from(vec![
         Span::styled("Tab", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
@@ -245,7 +215,7 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
         Span::styled("Esc", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled(": cancel", Style::default().fg(theme.text_dim)),
     ]);
-    frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme.surface)), rows[5]);
+    frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme.surface)), rows[4]);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,25 +273,6 @@ fn render_dir_results(frame: &mut Frame, dialog: &NewSessionDialog, area: Rect, 
         .style(Style::default().bg(theme.surface))
         .highlight_style(Style::default().bg(theme.bg));
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-fn render_text_field(
-    frame: &mut Frame, label: &str, value: &str, placeholder: Option<&str>,
-    focused: bool, area: Rect, theme: &Theme,
-) {
-    let span = if value.is_empty() {
-        if focused {
-            Span::styled("\u{2588}", Style::default().fg(theme.text))
-        } else {
-            Span::styled(placeholder.unwrap_or(""), Style::default().fg(theme.text_dim))
-        }
-    } else {
-        let cursor = if focused { "\u{2588}" } else { "" };
-        Span::styled(format!("{}{}", value, cursor), Style::default().fg(theme.text))
-    };
-    let title_str = format!(" {} ", label);
-    let block = field_block(&title_str, focused, theme);
-    frame.render_widget(Paragraph::new(Line::from(span)).block(block), area);
 }
 
 fn field_block<'a>(title: &'a str, focused: bool, theme: &'a Theme) -> Block<'a> {

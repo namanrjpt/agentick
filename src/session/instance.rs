@@ -16,6 +16,7 @@ pub enum Tool {
     OpenCode,
     Cursor,
     Aider,
+    Vibe,
     Shell,
     Custom(String),
 }
@@ -29,6 +30,7 @@ impl fmt::Display for Tool {
             Tool::OpenCode => write!(f, "opencode"),
             Tool::Cursor => write!(f, "cursor"),
             Tool::Aider => write!(f, "aider"),
+            Tool::Vibe => write!(f, "vibe"),
             Tool::Shell => write!(f, "shell"),
             Tool::Custom(name) => write!(f, "{}", name.to_lowercase()),
         }
@@ -45,6 +47,7 @@ impl Tool {
             "opencode" => Tool::OpenCode,
             "cursor" | "cursor-agent" => Tool::Cursor,
             "aider" => Tool::Aider,
+            "vibe" => Tool::Vibe,
             "bash" | "sh" | "zsh" | "fish" => Tool::Shell,
             other => Tool::Custom(other.to_string()),
         }
@@ -59,6 +62,7 @@ impl Tool {
             Tool::OpenCode => "\u{2588}", // █
             Tool::Cursor => "\u{25B2}",   // ▲
             Tool::Aider => "\u{2318}",    // ⌘
+            Tool::Vibe => "\u{25C8}",     // ◈
             Tool::Shell => "\u{25CB}",    // ○
             Tool::Custom(_) => "\u{25CF}", // ●
         }
@@ -67,12 +71,13 @@ impl Tool {
     /// The default CLI command used to launch this tool.
     pub fn default_command(&self) -> &str {
         match self {
-            Tool::Claude => "claude",
+            Tool::Claude => "claude --dangerously-skip-permissions",
             Tool::Gemini => "gemini",
             Tool::Codex => "codex",
             Tool::OpenCode => "opencode",
             Tool::Cursor => "cursor-agent",
             Tool::Aider => "aider",
+            Tool::Vibe => "vibe",
             Tool::Shell => "bash",
             Tool::Custom(name) => name.as_str(),
         }
@@ -87,6 +92,7 @@ impl Tool {
             Tool::OpenCode => 200_000,
             Tool::Cursor => 200_000,
             Tool::Aider => 200_000,
+            Tool::Vibe => 128_000,
             Tool::Shell => 0,
             Tool::Custom(_) => 200_000,
         }
@@ -109,7 +115,7 @@ pub enum Status {
 
 impl Default for Status {
     fn default() -> Self {
-        Status::Dead
+        Status::Idle
     }
 }
 
@@ -165,6 +171,10 @@ pub struct Session {
     pub cost_usd: Option<f64>,
 
     pub last_activity: Option<i64>,
+
+    /// If this session was forked from another, the parent agentick session ID.
+    #[serde(default)]
+    pub forked_from: Option<String>,
 }
 
 fn default_context_limit() -> u64 {
@@ -197,7 +207,26 @@ impl Session {
             model: None,
             cost_usd: None,
             last_activity: None,
+            forked_from: None,
         }
+    }
+
+    /// Create a new session that is a fork of `parent`.
+    ///
+    /// The caller is responsible for overriding `command` with the appropriate
+    /// `--resume <uuid> --fork-session` invocation before spawning tmux.
+    pub fn new_fork(parent: &Session) -> Self {
+        let mut s = Session::new(
+            format!("{} (fork)", parent.title),
+            parent.project_path.clone(),
+            parent.tool.clone(),
+        );
+        s.forked_from = Some(parent.id.clone());
+        // Inherit parent's context data so the bar shows immediately.
+        s.context_used = parent.context_used;
+        s.context_limit = parent.context_limit;
+        s.model = parent.model.clone();
+        s
     }
 
     /// Context usage as a percentage (0.0 – 100.0), if `context_used` is known.
@@ -260,6 +289,7 @@ mod tests {
         assert_eq!(Tool::from_command("cursor"), Tool::Cursor);
         assert_eq!(Tool::from_command("cursor-agent"), Tool::Cursor);
         assert_eq!(Tool::from_command("aider"), Tool::Aider);
+        assert_eq!(Tool::from_command("vibe"), Tool::Vibe);
         assert_eq!(Tool::from_command("bash"), Tool::Shell);
         assert_eq!(
             Tool::from_command("sometool"),
