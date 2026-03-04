@@ -261,6 +261,12 @@ impl App {
             _ => HashSet::new(),
         };
 
+        // Extract confirm-delete session ID for inline rendering.
+        let confirm_delete_id = match &self.mode {
+            AppMode::ConfirmDelete(id) => Some(id.as_str()),
+            _ => None,
+        };
+
         // Always render the dashboard underneath.
         dashboard::render_dashboard(
             frame,
@@ -277,6 +283,7 @@ impl App {
             rename_state,
             inline_new.as_ref(),
             &search_matches,
+            confirm_delete_id,
         );
 
         // Render modal overlays on top.
@@ -284,12 +291,8 @@ impl App {
             AppMode::NewSession(dialog) => {
                 new_session::render_new_session_dialog(frame, dialog, area);
             }
-            AppMode::ConfirmDelete(id) => {
-                dashboard::render_confirm_dialog(
-                    frame,
-                    &format!("Delete session '{}'?", id),
-                    area,
-                );
+            AppMode::ConfirmDelete(_) => {
+                // Handled inline in the session list row (red highlight + "Delete (Y/esc)?")
             }
             AppMode::ConfirmKill(id) => {
                 dashboard::render_confirm_dialog(
@@ -1156,49 +1159,18 @@ impl App {
 
     /// Move the cursor to the session with the given id.
     fn select_session_by_id(&mut self, target_id: &str) {
-        let filtered: Vec<&crate::session::instance::Session> = self
-            .store
-            .sessions
-            .iter()
-            .filter(|s| {
-                self.status_filter
-                    .as_ref()
-                    .map(|f| s.status.to_string() == *f)
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        let mut seen = HashSet::new();
-        let mut paths: Vec<String> = Vec::new();
-        for s in &filtered {
-            let key = s.project_path.to_string_lossy().to_string();
-            if seen.insert(key.clone()) {
-                paths.push(key);
-            }
-        }
-
-        let mut idx: usize = 0;
-        for path_key in &paths {
-            let group_sessions: Vec<&&crate::session::instance::Session> = filtered
-                .iter()
-                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
-                .collect();
-
-            let expanded = !self.collapsed_dirs.contains(path_key);
-
-            // Group header
-            idx += 1;
-
-            if expanded {
-                for sess in &group_sessions {
-                    if sess.id == target_id {
-                        self.selected = idx;
-                        self.preview_stale = true;
-                        return;
-                    }
-                    idx += 1;
-                }
-            }
+        if let Some(idx) = dashboard::find_session_display_index(
+            &self.store.sessions,
+            &self.collapsed_dirs,
+            target_id,
+            self.status_filter.as_deref(),
+        ) {
+            self.selected = idx;
+            self.preview_scroll = 0;
+            self.scroll_cache = None;
+            self.scroll_capture_handle = None;
+            self.preview_stale = true;
+            self.refresh_preview_content();
         }
     }
 
@@ -1692,6 +1664,9 @@ impl App {
         // Move the main cursor to the currently selected match in real-time.
         if let Some(&real_idx) = filtered_indices.get(selected) {
             self.selected = real_idx;
+            self.preview_scroll = 0;
+            self.scroll_cache = None;
+            self.scroll_capture_handle = None;
             self.preview_stale = true;
         }
 
@@ -1708,59 +1683,12 @@ impl App {
     /// returns the indices of session rows whose title or short_path
     /// case-insensitively contain `query`.
     fn compute_search_indices(&self, query: &str) -> Vec<usize> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let query_lower = query.to_lowercase();
-
-        let filtered: Vec<&crate::session::instance::Session> = self
-            .store
-            .sessions
-            .iter()
-            .filter(|s| {
-                self.status_filter
-                    .as_ref()
-                    .map(|f| s.status.to_string() == *f)
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        // Collect unique paths in order.
-        let mut seen = HashSet::new();
-        let mut paths: Vec<String> = Vec::new();
-        for s in &filtered {
-            let key = s.project_path.to_string_lossy().to_string();
-            if seen.insert(key.clone()) {
-                paths.push(key);
-            }
-        }
-
-        let mut indices = Vec::new();
-        let mut idx: usize = 0;
-
-        for path_key in &paths {
-            let group_sessions: Vec<&&crate::session::instance::Session> = filtered
-                .iter()
-                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
-                .collect();
-
-            // Group header row.
-            idx += 1;
-
-            let expanded = !self.collapsed_dirs.contains(path_key);
-            if expanded {
-                for sess in &group_sessions {
-                    if sess.title.to_lowercase().contains(&query_lower)
-                        || sess.short_path().to_lowercase().contains(&query_lower)
-                    {
-                        indices.push(idx);
-                    }
-                    idx += 1;
-                }
-            }
-        }
-
-        indices
+        dashboard::search_display_indices(
+            &self.store.sessions,
+            &self.collapsed_dirs,
+            query,
+            self.status_filter.as_deref(),
+        )
     }
 }
 

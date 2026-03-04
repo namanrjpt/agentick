@@ -88,6 +88,7 @@ pub fn render_dashboard(
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
     inline_new: Option<&InlineNewRenderState<'_>>,
     search_matches: &HashSet<usize>,
+    confirm_delete_id: Option<&str>,
 ) {
     let theme = dark_theme();
 
@@ -133,13 +134,13 @@ pub fn render_dashboard(
             ])
             .split(chunks[1]);
 
-        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new, search_matches);
+        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new, search_matches, confirm_delete_id);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
-        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new, search_matches);
+        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new, search_matches, confirm_delete_id);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -386,6 +387,7 @@ fn render_session_list(
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
     inline_new: Option<&InlineNewRenderState<'_>>,
     search_matches: &HashSet<usize>,
+    confirm_delete_id: Option<&str>,
 ) {
     let list_items: Vec<ListItem> = items
         .iter()
@@ -437,11 +439,16 @@ fn render_session_list(
                 ListItem::new(lines)
             }
             DisplayItem::SessionRow { session, is_last, is_fork, parent_continues } => {
+                let is_deleting = confirm_delete_id
+                    .map(|did| did == session.id)
+                    .unwrap_or(false);
                 let status_str = session.status.to_string();
                 let tool_str = session.tool.to_string();
 
                 // Active status: pulse between ○ (dim) and ● (green).
-                let (indicator_char, indicator_color) = if session.status == Status::Active {
+                let (indicator_char, indicator_color) = if is_deleting {
+                    (session.status.indicator(), ratatui::style::Color::White)
+                } else if session.status == Status::Active {
                     if tick_count % 2 == 0 {
                         ("\u{25CF}", status_color(&status_str))
                     } else {
@@ -474,9 +481,16 @@ fn render_session_list(
                 } else {
                     2 + 4 + 2 + 9
                 };
+                let delete_label = "Delete (Y/esc)?";
                 let bar_w: usize = 4;
                 let has_bar = session.context_percentage().is_some();
-                let bar_reserved = if has_bar { 1 + bar_w + 1 } else { 0 }; // " ████████ "
+                let bar_reserved = if is_deleting {
+                    1 + delete_label.len()
+                } else if has_bar {
+                    1 + bar_w + 1
+                } else {
+                    0
+                };
                 let max_title = (area.width as usize).saturating_sub(prefix_w + bar_reserved);
 
                 // Check if this session is being renamed inline.
@@ -495,27 +509,45 @@ fn render_session_list(
                     session.title.clone()
                 };
 
+                let delete_style = Style::default()
+                    .fg(ratatui::style::Color::White)
+                    .bg(theme.red);
+
                 let mut spans = vec![
                     Span::styled(
                         connector,
-                        Style::default()
-                            .fg(theme.border)
-                            .add_modifier(Modifier::DIM),
+                        if is_deleting {
+                            delete_style.add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(theme.border)
+                                .add_modifier(Modifier::DIM)
+                        },
                     ),
                     Span::styled(
                         format!("{} ", indicator_char),
-                        Style::default().fg(indicator_color),
+                        if is_deleting {
+                            delete_style.add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(indicator_color)
+                        },
                     ),
                 ];
                 // Skip tool name for forks — it's always the same as the parent.
                 if !*is_fork {
                     spans.push(Span::styled(
                         format!("{:<8} ", tool_str),
-                        Style::default().fg(tool_color(&tool_str)),
+                        if is_deleting {
+                            delete_style.add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(tool_color(&tool_str))
+                        },
                     ));
                 }
                 let is_search_match = search_matches.contains(&idx);
-                let title_style = if is_renaming {
+                let title_style = if is_deleting {
+                    delete_style.add_modifier(Modifier::BOLD)
+                } else if is_renaming {
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -530,9 +562,21 @@ fn render_session_list(
                 };
                 spans.push(Span::styled(title_display.clone(), title_style));
 
-                // Context bar: 4 chars, filled count + color by bucket
-                //   <25% → 1 white  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
-                if let Some(pct) = session.context_percentage() {
+                if is_deleting {
+                    // Right-align "Delete (Y/esc)?" label
+                    let used_w = prefix_w + title_display.len();
+                    let label_col = (area.width as usize).saturating_sub(delete_label.len() + 1);
+                    let gap = label_col.saturating_sub(used_w);
+                    if gap > 0 {
+                        spans.push(Span::styled(" ".repeat(gap), delete_style));
+                    }
+                    spans.push(Span::styled(
+                        delete_label,
+                        delete_style.add_modifier(Modifier::BOLD),
+                    ));
+                } else if let Some(pct) = session.context_percentage() {
+                    // Context bar: 4 chars, filled count + color by bucket
+                    //   <25% → 1 white  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
                     let (filled, color) = if pct >= 75.0 {
                         (4, theme.red)
                     } else if pct >= 50.0 {
@@ -624,17 +668,27 @@ fn render_session_list(
         (list_items, None)
     };
 
+    // When confirming delete, the selected row gets a red highlight instead of
+    // the default surface highlight, so the per-span bg colors aren't overridden.
+    let is_delete_selected = confirm_delete_id.is_some();
+    let highlight_style = if is_delete_selected {
+        Style::default()
+            .bg(theme.red)
+            .fg(ratatui::style::Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD)
+    };
+
     let list = List::new(final_items)
         .block(
             Block::default()
                 .borders(Borders::NONE)
                 .style(Style::default().bg(theme.bg)),
         )
-        .highlight_style(
-            Style::default()
-                .bg(theme.surface)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(highlight_style)
         .highlight_symbol("\u{258C} ")
         .repeat_highlight_symbol(true);
 
@@ -1040,4 +1094,75 @@ pub fn is_group_header(
     let canonical_paths = canonical_group_order(sessions);
     let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
     matches!(items.get(index), Some(DisplayItem::GroupHeader { .. }))
+}
+
+/// Find the display index for a session with the given id.
+///
+/// Uses the same `build_display_items` logic as the renderer to guarantee
+/// the returned index is consistent with what's drawn on screen.
+/// Find the display index for a session with the given id.
+///
+/// Uses the same `build_display_items` logic as the renderer to guarantee
+/// the returned index is consistent with what's drawn on screen.
+pub fn find_session_display_index(
+    sessions: &[Session],
+    collapsed_dirs: &HashSet<String>,
+    target_id: &str,
+    status_filter: Option<&str>,
+) -> Option<usize> {
+    let filtered: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| {
+            status_filter
+                .map(|f| s.status.to_string() == f)
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let canonical_paths = canonical_group_order(sessions);
+    let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
+    items.iter().position(|item| matches!(item, DisplayItem::SessionRow { session, .. } if session.id == target_id))
+}
+
+/// Return display indices of session rows matching a search query.
+///
+/// Uses `build_display_items` for consistent index computation.
+pub fn search_display_indices(
+    sessions: &[Session],
+    collapsed_dirs: &HashSet<String>,
+    query: &str,
+    status_filter: Option<&str>,
+) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query_lower = query.to_lowercase();
+
+    let filtered: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| {
+            status_filter
+                .map(|f| s.status.to_string() == f)
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let canonical_paths = canonical_group_order(sessions);
+    let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match item {
+            DisplayItem::SessionRow { session, .. } => {
+                if session.title.to_lowercase().contains(&query_lower)
+                    || session.short_path().to_lowercase().contains(&query_lower)
+                {
+                    Some(i)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect()
 }
