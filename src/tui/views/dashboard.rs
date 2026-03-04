@@ -1020,3 +1020,24 @@ pub fn display_item_count(
     let canonical_paths = canonical_group_order(sessions);
     build_display_items(&filtered, collapsed_dirs, &canonical_paths).len()
 }
+
+/// Returns `true` if the display item at `index` is a group header (not a session row).
+pub fn is_group_header(
+    sessions: &[Session],
+    collapsed_dirs: &HashSet<String>,
+    index: usize,
+    status_filter: Option<&str>,
+) -> bool {
+    let filtered: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| {
+            status_filter
+                .map(|f| s.status.to_string() == f)
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let canonical_paths = canonical_group_order(sessions);
+    let items = build_display_items(&filtered, collapsed_dirs, &canonical_paths);
+    matches!(items.get(index), Some(DisplayItem::GroupHeader { .. }))
+}

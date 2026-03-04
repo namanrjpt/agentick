@@ -655,10 +655,13 @@ pub fn preprocess_osc8_hyperlinks(input: &str) -> String {
                 if let Some((visible_end, after_close)) = find_osc8_close(bytes, after_open) {
                     // Copy everything before this OSC 8 sequence verbatim.
                     out.push_str(&input[last..i]);
-                    // Emit the visible text wrapped in blue + underline SGR.
-                    out.push_str("\x1b[4;34m");
+                    // Emit the visible text in blue. Use a full reset
+                    // (\x1b[0m) afterward — selective resets like \x1b[24m
+                    // can leak underline into adjacent table cells when
+                    // ansi_to_tui merges style spans.
+                    out.push_str("\x1b[34m");
                     out.push_str(&input[after_open..visible_end]);
-                    out.push_str("\x1b[24;39m");
+                    out.push_str("\x1b[0m");
                     last = after_close;
                     i = after_close;
                     continue;
@@ -791,41 +794,41 @@ mod tests {
     fn osc8_bel_terminator() {
         let input = "\x1b]8;;https://example.com\x07click here\x1b]8;;\x07";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "\x1b[4;34mclick here\x1b[24;39m");
+        assert_eq!(result, "\x1b[34mclick here\x1b[0m");
     }
 
     #[test]
     fn osc8_st_terminator() {
         let input = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "\x1b[4;34mclick here\x1b[24;39m");
+        assert_eq!(result, "\x1b[34mclick here\x1b[0m");
     }
 
     #[test]
     fn osc8_with_params() {
         let input = "\x1b]8;id=foo;https://example.com\x07link text\x1b]8;;\x07";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "\x1b[4;34mlink text\x1b[24;39m");
+        assert_eq!(result, "\x1b[34mlink text\x1b[0m");
     }
 
     #[test]
     fn osc8_surrounded_by_text() {
         let input = "before \x1b]8;;https://x.com\x07link\x1b]8;;\x07 after";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "before \x1b[4;34mlink\x1b[24;39m after");
+        assert_eq!(result, "before \x1b[34mlink\x1b[0m after");
     }
 
     #[test]
     fn osc8_multiple_links() {
         let input = "\x1b]8;;https://a.com\x07A\x1b]8;;\x07 and \x1b]8;;https://b.com\x07B\x1b]8;;\x07";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "\x1b[4;34mA\x1b[24;39m and \x1b[4;34mB\x1b[24;39m");
+        assert_eq!(result, "\x1b[34mA\x1b[0m and \x1b[34mB\x1b[0m");
     }
 
     #[test]
     fn osc8_preserves_utf8() {
         let input = "héllo \x1b]8;;https://x.com\x07wörld\x1b]8;;\x07 café";
         let result = preprocess_osc8_hyperlinks(input);
-        assert_eq!(result, "héllo \x1b[4;34mwörld\x1b[24;39m café");
+        assert_eq!(result, "héllo \x1b[34mwörld\x1b[0m café");
     }
 }

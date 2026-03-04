@@ -204,6 +204,8 @@ impl App {
         // Run the first tick immediately so statuses are detected before the
         // first frame is drawn, rather than waiting 500ms.
         app.tick();
+        // Skip the initial group header so the cursor starts on a session row.
+        app.clamp_cursor();
         Ok(app)
     }
 
@@ -934,6 +936,18 @@ impl App {
         let count = self.display_count();
         if count > 0 && self.selected < count - 1 {
             self.selected += 1;
+            // Skip group headers — land on the next session row.
+            if self.selected < count
+                && dashboard::is_group_header(
+                    &self.store.sessions,
+                    &self.collapsed_dirs,
+                    self.selected,
+                    self.status_filter.as_deref(),
+                )
+                && self.selected + 1 < count
+            {
+                self.selected += 1;
+            }
             self.preview_scroll = 0;
             self.scroll_cache = None;
             self.scroll_capture_handle = None;
@@ -944,6 +958,16 @@ impl App {
     fn move_cursor_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
+            // Skip group headers — land on the previous session row.
+            if dashboard::is_group_header(
+                &self.store.sessions,
+                &self.collapsed_dirs,
+                self.selected,
+                self.status_filter.as_deref(),
+            ) && self.selected > 0
+            {
+                self.selected -= 1;
+            }
             self.preview_scroll = 0;
             self.scroll_cache = None;
             self.scroll_capture_handle = None;
@@ -955,8 +979,20 @@ impl App {
         let count = self.display_count();
         if count == 0 {
             self.selected = 0;
-        } else if self.selected >= count {
+            return;
+        }
+        if self.selected >= count {
             self.selected = count - 1;
+        }
+        // If we landed on a group header, try moving to the next session row.
+        if dashboard::is_group_header(
+            &self.store.sessions,
+            &self.collapsed_dirs,
+            self.selected,
+            self.status_filter.as_deref(),
+        ) && self.selected + 1 < count
+        {
+            self.selected += 1;
         }
     }
 
