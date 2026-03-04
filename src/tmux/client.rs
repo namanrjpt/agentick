@@ -620,6 +620,123 @@ pub fn sanitize_session_name(title: &str, id: &str) -> String {
     format!("agentick_{}_{}", truncated, id_prefix)
 }
 
+/// Convert OSC 8 hyperlink sequences into blue underlined visible text.
+///
+/// OSC 8 format: `\x1b]8;params;URL\x07` visible text `\x1b]8;;\x07`
+/// (the BEL `\x07` terminator can also be `\x1b\\`).
+///
+/// `ansi_to_tui` doesn't handle OSC 8 and silently strips them. This
+/// preprocessing step keeps the visible link text and wraps it in
+/// underline + blue SGR codes so it's visually distinct in the preview pane.
+///
+/// If no OSC 8 sequences are found the input is returned unchanged.
+pub fn preprocess_osc8_hyperlinks(input: &str) -> String {
+    // Quick check — skip allocation if there are no OSC 8 sequences.
+    if !input.contains("\x1b]8;") {
+        return input.to_string();
+    }
+
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    // `last` tracks the start of the next uncopied region in `input`.
+    let mut last = 0;
+    let mut i = 0;
+
+    while i < len {
+        // Look for ESC ] 8 ;
+        if i + 3 < len
+            && bytes[i] == 0x1b
+            && bytes[i + 1] == b']'
+            && bytes[i + 2] == b'8'
+            && bytes[i + 3] == b';'
+        {
+            if let Some(after_open) = skip_osc8_open_tag(bytes, i) {
+                if let Some((visible_end, after_close)) = find_osc8_close(bytes, after_open) {
+                    // Copy everything before this OSC 8 sequence verbatim.
+                    out.push_str(&input[last..i]);
+                    // Emit the visible text wrapped in blue + underline SGR.
+                    out.push_str("\x1b[4;34m");
+                    out.push_str(&input[after_open..visible_end]);
+                    out.push_str("\x1b[24;39m");
+                    last = after_close;
+                    i = after_close;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Copy any remaining tail.
+    out.push_str(&input[last..]);
+    out
+}
+
+/// Skip past an OSC 8 opening tag starting at `pos`.
+/// Returns the byte offset immediately after the terminator, or `None`.
+fn skip_osc8_open_tag(data: &[u8], pos: usize) -> Option<usize> {
+    // Expect: \x1b ] 8 ; <params> ; <url> <terminator>
+    if data.len() < pos + 5
+        || data[pos] != 0x1b
+        || data[pos + 1] != b']'
+        || data[pos + 2] != b'8'
+        || data[pos + 3] != b';'
+    {
+        return None;
+    }
+
+    let mut i = pos + 4;
+    // Skip params until the second `;`.
+    while i < data.len() && data[i] != b';' {
+        if data[i] == 0x07 || (data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\') {
+            return None; // terminator before second `;` — not a valid opening tag
+        }
+        i += 1;
+    }
+    if i >= data.len() {
+        return None;
+    }
+    i += 1; // skip `;`
+
+    // Skip URL until terminator.
+    while i < data.len() {
+        if data[i] == 0x07 {
+            return Some(i + 1);
+        }
+        if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the OSC 8 closing tag starting search from `start`.
+/// Returns `(visible_text_end, byte_after_close_tag)` or `None`.
+fn find_osc8_close(data: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut i = start;
+    while i + 5 < data.len() {
+        if data[i] == 0x1b
+            && data[i + 1] == b']'
+            && data[i + 2] == b'8'
+            && data[i + 3] == b';'
+            && data[i + 4] == b';'
+        {
+            let visible_end = i;
+            let j = i + 5;
+            if j < data.len() && data[j] == 0x07 {
+                return Some((visible_end, j + 1));
+            }
+            if j + 1 < data.len() && data[j] == 0x1b && data[j + 1] == b'\\' {
+                return Some((visible_end, j + 2));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -661,5 +778,54 @@ mod tests {
     fn sanitize_short_id() {
         let name = sanitize_session_name("test", "abc");
         assert_eq!(name, "agentick_test_abc");
+    }
+
+    #[test]
+    fn osc8_no_links() {
+        let input = "hello world \x1b[31mred\x1b[0m";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn osc8_bel_terminator() {
+        let input = "\x1b]8;;https://example.com\x07click here\x1b]8;;\x07";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "\x1b[4;34mclick here\x1b[24;39m");
+    }
+
+    #[test]
+    fn osc8_st_terminator() {
+        let input = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "\x1b[4;34mclick here\x1b[24;39m");
+    }
+
+    #[test]
+    fn osc8_with_params() {
+        let input = "\x1b]8;id=foo;https://example.com\x07link text\x1b]8;;\x07";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "\x1b[4;34mlink text\x1b[24;39m");
+    }
+
+    #[test]
+    fn osc8_surrounded_by_text() {
+        let input = "before \x1b]8;;https://x.com\x07link\x1b]8;;\x07 after";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "before \x1b[4;34mlink\x1b[24;39m after");
+    }
+
+    #[test]
+    fn osc8_multiple_links() {
+        let input = "\x1b]8;;https://a.com\x07A\x1b]8;;\x07 and \x1b]8;;https://b.com\x07B\x1b]8;;\x07";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "\x1b[4;34mA\x1b[24;39m and \x1b[4;34mB\x1b[24;39m");
+    }
+
+    #[test]
+    fn osc8_preserves_utf8() {
+        let input = "héllo \x1b]8;;https://x.com\x07wörld\x1b]8;;\x07 café";
+        let result = preprocess_osc8_hyperlinks(input);
+        assert_eq!(result, "héllo \x1b[4;34mwörld\x1b[24;39m café");
     }
 }

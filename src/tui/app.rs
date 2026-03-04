@@ -835,6 +835,7 @@ impl App {
 
         match tmux::capture_pane_ansi(&name) {
             Ok(ansi) => {
+                let ansi = tmux::preprocess_osc8_hyperlinks(&ansi);
                 match ansi.as_bytes().into_text() {
                     Ok(mut text) => {
                         // Trim trailing blank lines — the control client's
@@ -891,6 +892,7 @@ impl App {
         if let Some(handle) = self.scroll_capture_handle.take() {
             if handle.is_finished() {
                 if let Ok(Some(content)) = handle.join() {
+                    let content = tmux::preprocess_osc8_hyperlinks(&content);
                     if let Ok(text) = content.as_bytes().into_text() {
                         self.scroll_cache = Some(text);
                     }
