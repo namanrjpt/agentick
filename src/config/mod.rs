@@ -5,6 +5,10 @@ use std::path::PathBuf;
 pub struct Config {
     pub default_tool: Option<String>,
     pub theme: Option<String>,
+    /// When set, selecting a directory in inline-new mode auto-creates a
+    /// session with this tool (e.g. "claude") instead of showing the tool
+    /// picker.  Set to `null` or omit to always show the picker.
+    pub auto_create_tool: Option<String>,
 }
 
 impl Config {

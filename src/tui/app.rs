@@ -20,8 +20,10 @@ use crate::tmux::client as tmux;
 use crate::tmux::control::TmuxControlClient;
 use crate::tmux::detector::{self, DetectionContext, HookStatus};
 use crate::tui::views::dashboard;
+use crate::tui::views::dashboard::InlineNewRenderState;
 use crate::tui::views::new_session::{self, DialogAction, NewSessionDialog};
 use crate::tui::views::search;
+use crate::tui::zoxide::{self, ZoxideEntry};
 
 // ---------------------------------------------------------------------------
 // Focus pane
@@ -40,6 +42,15 @@ pub enum FocusPane {
 // App mode
 // ---------------------------------------------------------------------------
 
+/// Which step of the inline new-session flow we're on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InlineNewStep {
+    /// Typing a fuzzy directory search query.
+    DirSearch,
+    /// Directory chosen — pick a tool via quick-create keys.
+    ToolPick,
+}
+
 pub enum AppMode {
     Normal,
     NewSession(Box<NewSessionDialog>),
@@ -56,6 +67,13 @@ pub enum AppMode {
     Rename {
         session_id: String,
         buf: String,
+    },
+    InlineNew {
+        query: String,
+        zoxide_dirs: Vec<ZoxideEntry>,
+        dir_selected: usize,
+        step: InlineNewStep,
+        project_path: Option<PathBuf>,
     },
 }
 
@@ -134,6 +152,8 @@ pub struct App {
     collapsed_dirs: HashSet<String>,
     /// Background threads generating LLM summaries for Claude session titles.
     summary_handles: HashMap<String, JoinHandle<(String, Option<String>)>>,
+    /// User config loaded from ~/.agentick/config.toml.
+    config: crate::config::Config,
 }
 
 impl App {
@@ -145,6 +165,7 @@ impl App {
         crate::session::tokens::refresh_all(&mut store.sessions, &mut token_cache);
         // Ensure hook handler script and Claude Code hook config are installed.
         crate::hooks::setup::ensure_hooks_installed();
+        let config = crate::config::Config::load();
         let mut app = Self {
             store,
             selected: 0,
@@ -177,6 +198,7 @@ impl App {
             token_cache,
             collapsed_dirs: HashSet::new(),
             summary_handles: HashMap::new(),
+            config,
         };
         app.spawn_summary_threads();
         // Run the first tick immediately so statuses are detected before the
@@ -202,6 +224,33 @@ impl App {
             _ => None,
         };
 
+        // Extract inline-new state for dashboard rendering.
+        let inline_new = match &self.mode {
+            AppMode::InlineNew {
+                query,
+                zoxide_dirs,
+                dir_selected,
+                step,
+                ..
+            } => {
+                let suggestions: Vec<(String, f64)> = if *step == InlineNewStep::DirSearch {
+                    zoxide::fuzzy_filter(zoxide_dirs, query, 5)
+                        .into_iter()
+                        .map(|e| (e.path.clone(), e.score))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Some(InlineNewRenderState {
+                    query,
+                    suggestions,
+                    dir_selected: *dir_selected,
+                    is_dir_search: *step == InlineNewStep::DirSearch,
+                })
+            }
+            _ => None,
+        };
+
         // Always render the dashboard underneath.
         dashboard::render_dashboard(
             frame,
@@ -216,6 +265,7 @@ impl App {
             self.frame_count,
             area,
             rename_state,
+            inline_new.as_ref(),
         );
 
         // Render modal overlays on top.
@@ -247,7 +297,14 @@ impl App {
             AppMode::QuickCreate { project_path } => {
                 dashboard::render_quick_create_sheet(frame, project_path, area);
             }
-            AppMode::Normal | AppMode::Rename { .. } => {}
+            AppMode::InlineNew {
+                step: InlineNewStep::ToolPick,
+                project_path: Some(path),
+                ..
+            } => {
+                dashboard::render_quick_create_sheet(frame, path, area);
+            }
+            AppMode::Normal | AppMode::Rename { .. } | AppMode::InlineNew { .. } => {}
         }
     }
 
@@ -306,8 +363,11 @@ impl App {
                             &session.command,
                         );
                         // Add to store and save.
+                        let session_id = session.id.clone();
                         self.store.add_session(session);
                         let _ = self.store.save();
+                        // Auto-select the newly created session.
+                        self.select_session_by_id(&session_id);
                     }
                 }
             }
@@ -354,6 +414,9 @@ impl App {
             AppMode::Rename { .. } => {
                 self.handle_rename_key(key);
             }
+            AppMode::InlineNew { .. } => {
+                self.handle_inline_new_key(key);
+            }
         }
     }
 
@@ -378,7 +441,14 @@ impl App {
                 }
             }
             KeyCode::Char('N') => {
-                self.mode = AppMode::NewSession(Box::new(NewSessionDialog::new()));
+                let dirs = zoxide::load_zoxide_dirs();
+                self.mode = AppMode::InlineNew {
+                    query: String::new(),
+                    zoxide_dirs: dirs,
+                    dir_selected: 0,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
             }
             KeyCode::Char('d') => {
                 if let Some(id) = self.selected_session_id() {
@@ -882,54 +952,13 @@ impl App {
     /// Get the session id of the currently selected item (if it is a session
     /// row, not a group header).
     fn selected_session_id(&self) -> Option<String> {
-        let filtered: Vec<&crate::session::instance::Session> = self
-            .store
-            .sessions
-            .iter()
-            .filter(|s| {
-                self.status_filter
-                    .as_ref()
-                    .map(|f| s.status.to_string() == *f)
-                    .unwrap_or(true)
-            })
-            .collect();
-
-        // Walk the auto-grouped display list by project_path.
-        let mut seen = HashSet::new();
-        let mut paths: Vec<String> = Vec::new();
-        for s in &filtered {
-            let key = s.project_path.to_string_lossy().to_string();
-            if seen.insert(key.clone()) {
-                paths.push(key);
-            }
-        }
-
-        let mut idx: usize = 0;
-        for path_key in &paths {
-            let group_sessions: Vec<&&crate::session::instance::Session> = filtered
-                .iter()
-                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
-                .collect();
-
-            let expanded = !self.collapsed_dirs.contains(path_key);
-
-            // Group header
-            if idx == self.selected {
-                return None;
-            }
-            idx += 1;
-
-            if expanded {
-                for sess in &group_sessions {
-                    if idx == self.selected {
-                        return Some(sess.id.clone());
-                    }
-                    idx += 1;
-                }
-            }
-        }
-
-        None
+        dashboard::find_selected_session(
+            &self.store.sessions,
+            &self.collapsed_dirs,
+            self.selected,
+            self.status_filter.as_deref(),
+        )
+        .map(|s| s.id.clone())
     }
 
     /// Get the project path of the currently selected item, whether it's a
@@ -1026,19 +1055,8 @@ impl App {
             _ => unreachable!(),
         };
 
-        let tool = crate::session::instance::Tool::from_command(cmd);
-
-        let session =
-            crate::session::instance::Session::new(String::new(), project_path.clone(), tool);
-
-        // Spawn tmux session
-        let _ = tmux::create_session(&session.tmux_name, &session.project_path, &session.command);
-
-        // Add to store and save
-        self.store.add_session(session);
-        let _ = self.store.save();
-
         self.mode = AppMode::Normal;
+        self.create_session_and_select(project_path, cmd);
     }
 
     // --- Inline rename ------------------------------------------------------
@@ -1069,6 +1087,258 @@ impl App {
                 buf.push(c);
             }
             _ => {}
+        }
+    }
+
+    // --- Inline new session -------------------------------------------------
+
+    /// Create a new session with the given tool and project path, add it to the
+    /// store, and move the cursor to select it.
+    fn create_session_and_select(&mut self, project_path: PathBuf, cmd: &str) {
+        let tool = crate::session::instance::Tool::from_command(cmd);
+        let session =
+            crate::session::instance::Session::new(String::new(), project_path.clone(), tool);
+        let _ = tmux::create_session(&session.tmux_name, &session.project_path, &session.command);
+        let session_id = session.id.clone();
+        self.store.add_session(session);
+        let _ = self.store.save();
+
+        // Select the newly created session by finding its index in the display list.
+        self.select_session_by_id(&session_id);
+    }
+
+    /// Move the cursor to the session with the given id.
+    fn select_session_by_id(&mut self, target_id: &str) {
+        let filtered: Vec<&crate::session::instance::Session> = self
+            .store
+            .sessions
+            .iter()
+            .filter(|s| {
+                self.status_filter
+                    .as_ref()
+                    .map(|f| s.status.to_string() == *f)
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        let mut seen = HashSet::new();
+        let mut paths: Vec<String> = Vec::new();
+        for s in &filtered {
+            let key = s.project_path.to_string_lossy().to_string();
+            if seen.insert(key.clone()) {
+                paths.push(key);
+            }
+        }
+
+        let mut idx: usize = 0;
+        for path_key in &paths {
+            let group_sessions: Vec<&&crate::session::instance::Session> = filtered
+                .iter()
+                .filter(|s| s.project_path.to_string_lossy() == path_key.as_str())
+                .collect();
+
+            let expanded = !self.collapsed_dirs.contains(path_key);
+
+            // Group header
+            idx += 1;
+
+            if expanded {
+                for sess in &group_sessions {
+                    if sess.id == target_id {
+                        self.selected = idx;
+                        self.preview_stale = true;
+                        return;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    fn handle_inline_new_key(&mut self, key: KeyEvent) {
+        // Extract fields to avoid borrow conflicts.
+        let (query, zoxide_dirs, dir_selected, step, project_path) = match &mut self.mode {
+            AppMode::InlineNew {
+                query,
+                zoxide_dirs,
+                dir_selected,
+                step,
+                project_path,
+            } => (
+                query.clone(),
+                std::mem::take(zoxide_dirs),
+                *dir_selected,
+                *step,
+                project_path.clone(),
+            ),
+            _ => return,
+        };
+
+        match step {
+            InlineNewStep::DirSearch => {
+                self.handle_inline_dir_search(key, query, zoxide_dirs, dir_selected);
+            }
+            InlineNewStep::ToolPick => {
+                self.handle_inline_tool_pick(key, query, zoxide_dirs, dir_selected, project_path);
+            }
+        }
+    }
+
+    fn handle_inline_dir_search(
+        &mut self,
+        key: KeyEvent,
+        mut query: String,
+        zoxide_dirs: Vec<ZoxideEntry>,
+        mut dir_selected: usize,
+    ) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Enter => {
+                // Confirm the selected directory.
+                let filtered = zoxide::fuzzy_filter(&zoxide_dirs, &query, 5);
+                let path = if let Some(entry) = filtered.get(dir_selected) {
+                    PathBuf::from(&entry.path)
+                } else if !query.is_empty() {
+                    // Treat raw input as a path.
+                    PathBuf::from(&query)
+                } else {
+                    // Nothing to confirm.
+                    self.mode = AppMode::InlineNew {
+                        query,
+                        zoxide_dirs,
+                        dir_selected,
+                        step: InlineNewStep::DirSearch,
+                        project_path: None,
+                    };
+                    return;
+                };
+
+                // If auto_create_tool is configured, create immediately and select.
+                if let Some(ref tool_cmd) = self.config.auto_create_tool.clone() {
+                    self.mode = AppMode::Normal;
+                    self.create_session_and_select(path, tool_cmd);
+                } else {
+                    self.mode = AppMode::InlineNew {
+                        query,
+                        zoxide_dirs,
+                        dir_selected,
+                        step: InlineNewStep::ToolPick,
+                        project_path: Some(path),
+                    };
+                }
+            }
+            KeyCode::Up => {
+                dir_selected = dir_selected.saturating_sub(1);
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+            KeyCode::Down => {
+                let max = zoxide::fuzzy_filter(&zoxide_dirs, &query, 5)
+                    .len()
+                    .saturating_sub(1);
+                if dir_selected < max {
+                    dir_selected += 1;
+                }
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                dir_selected = 0;
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                dir_selected = 0;
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+            _ => {
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+        }
+    }
+
+    fn handle_inline_tool_pick(
+        &mut self,
+        key: KeyEvent,
+        query: String,
+        zoxide_dirs: Vec<ZoxideEntry>,
+        dir_selected: usize,
+        project_path: Option<PathBuf>,
+    ) {
+        match key.code {
+            KeyCode::Esc => {
+                // Back to DirSearch.
+                self.mode = AppMode::InlineNew {
+                    query,
+                    zoxide_dirs,
+                    dir_selected,
+                    step: InlineNewStep::DirSearch,
+                    project_path: None,
+                };
+            }
+            KeyCode::Char('N') => {
+                // Full dialog.
+                self.mode = AppMode::NewSession(Box::new(NewSessionDialog::new()));
+            }
+            KeyCode::Char(ch) => {
+                let entry = dashboard::QUICK_CREATE_KEYS
+                    .iter()
+                    .find(|(k, _, _)| *k == ch);
+
+                let (_key, _label, cmd) = match entry {
+                    Some(e) => e,
+                    None => {
+                        // Unmapped key — back to normal.
+                        self.mode = AppMode::Normal;
+                        return;
+                    }
+                };
+
+                let path = match project_path {
+                    Some(p) => p,
+                    None => {
+                        self.mode = AppMode::Normal;
+                        return;
+                    }
+                };
+
+                self.mode = AppMode::Normal;
+                self.create_session_and_select(path, cmd);
+            }
+            _ => {
+                self.mode = AppMode::Normal;
+            }
         }
     }
 

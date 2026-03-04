@@ -15,6 +15,18 @@ use crate::tui::app::FocusPane;
 use crate::tui::theme::{dark_theme, status_color, tool_color, Theme};
 
 // ---------------------------------------------------------------------------
+// Inline new-session render state (passed from app.rs)
+// ---------------------------------------------------------------------------
+
+/// Data needed to render the inline new-session input in the session list.
+pub struct InlineNewRenderState<'a> {
+    pub query: &'a str,
+    pub suggestions: Vec<(String, f64)>, // (path, score)
+    pub dir_selected: usize,
+    pub is_dir_search: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Quick-create key map
 // ---------------------------------------------------------------------------
 
@@ -45,6 +57,9 @@ enum DisplayItem<'a> {
         session: &'a Session,
         is_last: bool,
         is_fork: bool,
+        /// For fork rows: whether the parent's tree continues (more top-level
+        /// sessions follow), so we draw a │ continuation line.
+        parent_continues: bool,
     },
 }
 
@@ -71,6 +86,7 @@ pub fn render_dashboard(
     tick_count: u32,
     area: Rect,
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
+    inline_new: Option<&InlineNewRenderState<'_>>,
 ) {
     let theme = dark_theme();
 
@@ -116,13 +132,13 @@ pub fn render_dashboard(
             ])
             .split(chunks[1]);
 
-        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state);
+        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
-        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state);
+        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -321,19 +337,24 @@ fn build_display_items<'a>(
                 // Parent is "last" in tree only if it's the last top-level
                 // AND has no forks (forks extend the subtree).
                 let parent_is_last = i == top_last_idx && !has_forks;
+                // Whether more top-level sessions follow this parent's subtree.
+                let more_siblings = i < top_last_idx;
 
                 items.push(DisplayItem::SessionRow {
                     session: sess,
                     is_last: parent_is_last,
                     is_fork: false,
+                    parent_continues: false,
                 });
 
                 let fork_last_idx = forks.len().saturating_sub(1);
                 for (fi, fork) in forks.iter().enumerate() {
+                    let fork_is_last = fi == fork_last_idx;
                     items.push(DisplayItem::SessionRow {
                         session: fork,
-                        is_last: fi == fork_last_idx,
+                        is_last: fork_is_last,
                         is_fork: true,
+                        parent_continues: more_siblings,
                     });
                 }
             }
@@ -355,6 +376,7 @@ fn render_session_list(
     area: Rect,
     theme: &Theme,
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
+    inline_new: Option<&InlineNewRenderState<'_>>,
 ) {
     let list_items: Vec<ListItem> = items
         .iter()
@@ -405,7 +427,7 @@ fn render_session_list(
 
                 ListItem::new(lines)
             }
-            DisplayItem::SessionRow { session, is_last, is_fork } => {
+            DisplayItem::SessionRow { session, is_last, is_fork, parent_continues } => {
                 let status_str = session.status.to_string();
                 let tool_str = session.tool.to_string();
 
@@ -423,10 +445,18 @@ fn render_session_list(
                 // Tree connector — forks align └─ with parent title's left edge
                 // Parent layout: connector(4) + indicator(2) + tool(9) = 15 cols before title
                 let connector = if *is_fork {
-                    // 15 spaces to reach title column, then └─ + space
-                    if *is_last { "               \u{2514}\u{2500} " } else { "               \u{251C}\u{2500} " }
+                    // Show │ continuation when more top-level sessions follow.
+                    // " │             └─ " or "               └─ "
+                    match (*parent_continues, *is_last) {
+                        (true,  true)  => " \u{2502}             \u{2514}\u{2500} ",
+                        (true,  false) => " \u{2502}             \u{251C}\u{2500} ",
+                        (false, true)  => "               \u{2514}\u{2500} ",
+                        (false, false) => "               \u{251C}\u{2500} ",
+                    }
+                } else if *is_last {
+                    " \u{2514}\u{2500} "
                 } else {
-                    if *is_last { " \u{2514}\u{2500} " } else { " \u{251C}\u{2500} " }
+                    " \u{251C}\u{2500} "
                 };
 
                 // Layout: highlight(2) + connector + indicator(2) [+ tool(9) if not fork] + title
@@ -525,7 +555,62 @@ fn render_session_list(
         })
         .collect();
 
-    let list = List::new(list_items)
+    // --- Append inline new-session rows when active --------------------------
+    let (final_items, pin_selection) = if let Some(ins) = inline_new {
+        let mut all = list_items;
+        // Separator line.
+        all.push(ListItem::new(Line::from(Span::styled(
+            "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
+            Style::default().fg(theme.border).add_modifier(Modifier::DIM),
+        ))));
+
+        // Input row: " + New: query█" or placeholder.
+        let input_idx = all.len();
+        let display_query = if ins.query.is_empty() && ins.is_dir_search {
+            "\u{2588} type to search directories...".to_string()
+        } else {
+            format!("{}\u{2588}", ins.query)
+        };
+        all.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                " + New: ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                display_query,
+                Style::default()
+                    .fg(if ins.is_dir_search { theme.text } else { theme.accent })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])));
+
+        // Suggestion rows (only during DirSearch step).
+        if ins.is_dir_search {
+            for (i, (path, _score)) in ins.suggestions.iter().enumerate() {
+                let is_sel = i == ins.dir_selected;
+                let prefix = if is_sel { "   \u{25B6} " } else { "     " };
+                let short = shorten_home(path);
+                all.push(ListItem::new(Line::from(vec![
+                    Span::styled(
+                        prefix,
+                        Style::default().fg(if is_sel { theme.accent } else { theme.text_dim }),
+                    ),
+                    Span::styled(
+                        short,
+                        Style::default().fg(if is_sel { theme.text } else { theme.text_dim }),
+                    ),
+                ])));
+            }
+        }
+
+        (all, Some(input_idx))
+    } else {
+        (list_items, None)
+    };
+
+    let list = List::new(final_items)
         .block(
             Block::default()
                 .borders(Borders::NONE)
@@ -540,11 +625,24 @@ fn render_session_list(
         .repeat_highlight_symbol(true);
 
     let mut state = ListState::default();
-    if !items.is_empty() {
+    if let Some(pin) = pin_selection {
+        state.select(Some(pin));
+    } else if !items.is_empty() {
         state.select(Some(selected.min(items.len().saturating_sub(1))));
     }
 
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Replace `$HOME` prefix with `~` for display.
+fn shorten_home(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        let h = home.to_string_lossy();
+        if path.starts_with(h.as_ref()) {
+            return format!("~{}", &path[h.len()..]);
+        }
+    }
+    path.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +652,7 @@ fn render_session_list(
 /// Walk the flattened display list and return the `Session` at the given
 /// `selected` index, or `None` if the index points at a group header or is
 /// out of range.
-fn find_selected_session<'a>(
+pub fn find_selected_session<'a>(
     sessions: &'a [Session],
     collapsed_dirs: &HashSet<String>,
     selected: usize,
