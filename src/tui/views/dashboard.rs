@@ -318,10 +318,17 @@ fn build_display_items<'a>(
         });
 
         if expanded {
-            // Separate top-level sessions (no parent) from forks.
+            // Collect all session IDs in this group so we can detect orphaned forks.
+            let group_ids: HashSet<&str> = group_sessions.iter().map(|s| s.id.as_str()).collect();
+
+            // Separate top-level sessions (no parent) and orphaned forks
+            // (parent was deleted) from forks whose parent is still present.
             let top_level: Vec<&'a Session> = group_sessions
                 .iter()
-                .filter(|s| s.forked_from.is_none())
+                .filter(|s| match &s.forked_from {
+                    None => true,
+                    Some(parent_id) => !group_ids.contains(parent_id.as_str()),
+                })
                 .copied()
                 .collect();
             let top_last_idx = top_level.len().saturating_sub(1);
