@@ -154,6 +154,31 @@ pub fn set_option(name: &str, option: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resize a tmux session's window to the given columns and rows.
+///
+/// Equivalent to: `tmux resize-window -t <name> -x <cols> -y <rows>`
+pub fn resize_window(name: &str, cols: u16, rows: u16) -> Result<()> {
+    let output = Command::new("tmux")
+        .args([
+            "resize-window",
+            "-t",
+            name,
+            "-x",
+            &cols.to_string(),
+            "-y",
+            &rows.to_string(),
+        ])
+        .output()
+        .wrap_err("failed to spawn tmux resize-window")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre!("tmux resize-window failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
 /// Clear the scrollback history of a session's pane.
 ///
 /// Equivalent to: `tmux clear-history -t <name>`

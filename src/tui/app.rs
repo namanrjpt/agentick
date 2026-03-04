@@ -154,6 +154,9 @@ pub struct App {
     summary_handles: HashMap<String, JoinHandle<(String, Option<String>)>>,
     /// User config loaded from ~/.agentick/config.toml.
     config: crate::config::Config,
+    /// Preview pane inner dimensions (cols, rows) from last draw — used to
+    /// resize tmux panes so `capture-pane` returns content that fits.
+    preview_size: Option<(u16, u16)>,
 }
 
 impl App {
@@ -199,6 +202,7 @@ impl App {
             collapsed_dirs: HashSet::new(),
             summary_handles: HashMap::new(),
             config,
+            preview_size: None,
         };
         app.spawn_summary_threads();
         // Run the first tick immediately so statuses are detected before the
@@ -216,6 +220,21 @@ impl App {
         // If terminal is too narrow for the right pane, force focus left.
         if area.width <= 100 && self.focus == FocusPane::Right {
             self.focus = FocusPane::Left;
+        }
+
+        // Compute preview pane inner size for tmux pane resizing.
+        if area.width > 100 {
+            // Layout: top bar(3) + main(rest) + help(1). Main splits 25%/75%.
+            let main_height = area.height.saturating_sub(4); // 3 top + 1 help
+            let preview_width = (area.width as u32 * 75 / 100) as u16;
+            // Inner = total - 2 (borders on each side)
+            let inner_w = preview_width.saturating_sub(2);
+            let inner_h = main_height.saturating_sub(2);
+            if inner_w > 0 && inner_h > 0 {
+                self.preview_size = Some((inner_w, inner_h));
+            }
+        } else {
+            self.preview_size = None;
         }
 
         // Extract rename state for dashboard rendering.
@@ -251,6 +270,14 @@ impl App {
             _ => None,
         };
 
+        // Extract search highlight indices for the dashboard.
+        let search_matches: HashSet<usize> = match &self.mode {
+            AppMode::Search { filtered_indices, .. } => {
+                filtered_indices.iter().copied().collect()
+            }
+            _ => HashSet::new(),
+        };
+
         // Always render the dashboard underneath.
         dashboard::render_dashboard(
             frame,
@@ -266,6 +293,7 @@ impl App {
             area,
             rename_state,
             inline_new.as_ref(),
+            &search_matches,
         );
 
         // Render modal overlays on top.
@@ -322,10 +350,19 @@ impl App {
             && key.modifiers.is_empty()
         {
             if self.terminal_width > 100 {
-                self.focus = match self.focus {
+                let new_focus = match self.focus {
                     FocusPane::Left => FocusPane::Right,
                     FocusPane::Right => FocusPane::Left,
                 };
+                // Restore full terminal size when entering interactive mode
+                // (preview mode shrinks the pane to fit).
+                if new_focus == FocusPane::Right {
+                    if let Some(name) = self.selected_session_tmux_name() {
+                        let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(40);
+                        let _ = tmux::resize_window(&name, self.terminal_width, h);
+                    }
+                }
+                self.focus = new_focus;
             }
             return;
         }
@@ -464,10 +501,9 @@ impl App {
                 self.cycle_status_filter();
             }
             KeyCode::Char('/') => {
-                let filtered_indices = self.compute_search_indices("");
                 self.mode = AppMode::Search {
                     query: String::new(),
-                    filtered_indices,
+                    filtered_indices: Vec::new(),
                     selected: 0,
                 };
             }
@@ -823,6 +859,15 @@ impl App {
                 return;
             }
         };
+
+        // Resize the tmux pane to match the preview width so capture-pane
+        // returns content that fits.  Only in preview mode (left pane focused);
+        // interactive mode uses the control client's refresh-client -C instead.
+        if self.focus == FocusPane::Left {
+            if let Some((cols, rows)) = self.preview_size {
+                let _ = tmux::resize_window(&name, cols, rows);
+            }
+        }
 
         match tmux::capture_pane_ansi(&name) {
             Ok(ansi) => {
@@ -1415,6 +1460,9 @@ impl App {
         // Ensure the status bar is hidden (covers sessions created before this fix).
         let _ = tmux::set_option(&tmux_name, "status", "off");
 
+        // Restore full terminal size (preview mode shrinks the pane to fit).
+        let _ = tmux::resize_window(&tmux_name, self.terminal_width, crossterm::terminal::size().map(|(_, h)| h).unwrap_or(40));
+
         // Leave TUI alternate screen and disable mouse capture, but keep
         // keyboard enhancement active so the outer terminal keeps sending
         // modifier info (Kitty/xterm protocol). tmux needs this to detect
@@ -1642,6 +1690,12 @@ impl App {
             selected = filtered_indices.len() - 1;
         }
 
+        // Move the main cursor to the currently selected match in real-time.
+        if let Some(&real_idx) = filtered_indices.get(selected) {
+            self.selected = real_idx;
+            self.preview_stale = true;
+        }
+
         self.mode = AppMode::Search {
             query,
             filtered_indices,
@@ -1655,6 +1709,9 @@ impl App {
     /// returns the indices of session rows whose title or short_path
     /// case-insensitively contain `query`.
     fn compute_search_indices(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
         let query_lower = query.to_lowercase();
 
         let filtered: Vec<&crate::session::instance::Session> = self
@@ -1694,8 +1751,7 @@ impl App {
             let expanded = !self.collapsed_dirs.contains(path_key);
             if expanded {
                 for sess in &group_sessions {
-                    if query_lower.is_empty()
-                        || sess.title.to_lowercase().contains(&query_lower)
+                    if sess.title.to_lowercase().contains(&query_lower)
                         || sess.short_path().to_lowercase().contains(&query_lower)
                     {
                         indices.push(idx);

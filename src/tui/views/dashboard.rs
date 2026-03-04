@@ -87,6 +87,7 @@ pub fn render_dashboard(
     area: Rect,
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
     inline_new: Option<&InlineNewRenderState<'_>>,
+    search_matches: &HashSet<usize>,
 ) {
     let theme = dark_theme();
 
@@ -132,13 +133,13 @@ pub fn render_dashboard(
             ])
             .split(chunks[1]);
 
-        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new);
+        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new, search_matches);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
-        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new);
+        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new, search_matches);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -377,6 +378,7 @@ fn render_session_list(
     theme: &Theme,
     rename_state: Option<(&str, &str)>, // (session_id, buffer)
     inline_new: Option<&InlineNewRenderState<'_>>,
+    search_matches: &HashSet<usize>,
 ) {
     let list_items: Vec<ListItem> = items
         .iter()
@@ -505,9 +507,14 @@ fn render_session_list(
                         Style::default().fg(tool_color(&tool_str)),
                     ));
                 }
+                let is_search_match = search_matches.contains(&idx);
                 let title_style = if is_renaming {
                     Style::default()
                         .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else if is_search_match {
+                    Style::default()
+                        .fg(theme.yellow)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                 } else {
                     Style::default()
