@@ -9,6 +9,10 @@ A terminal UI session manager for AI coding agents. Manage multiple AI tool sess
 [![CI](https://img.shields.io/github/actions/workflow/status/namanrjpt/agentick/release.yml)](https://github.com/namanrjpt/agentick/actions)
 [![GitHub stars](https://img.shields.io/github/stars/namanrjpt/agentick)](https://github.com/namanrjpt/agentick/stargazers)
 
+## Demo
+
+<video src="https://github.com/namanrjpt/agentick/raw/main/demo.mp4" width="100%" autoplay loop muted playsinline></video>
+
 ## Features
 
 - **Multi-agent dashboard** -- run Claude, Gemini, Codex, Cursor, Aider, and more side by side
