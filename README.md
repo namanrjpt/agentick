@@ -11,7 +11,7 @@ A terminal UI session manager for AI coding agents. Manage multiple AI tool sess
 
 ## Demo
 
-https://github.com/user-attachments/assets/3231a478-e617-4804-beaa-a95504cd7cf9
+https://github.com/user-attachments/assets/5d9dd8e4-2eb7-4ccf-a8d9-b511bac62d38
 
 ## Features
 
