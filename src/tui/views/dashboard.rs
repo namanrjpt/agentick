@@ -576,7 +576,7 @@ fn render_session_list(
                     ));
                 } else if let Some(pct) = session.context_percentage() {
                     // Context bar: 4 chars, filled count + color by bucket
-                    //   <25% → 1 white  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
+                    //   <25% → 1 green  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
                     let (filled, color) = if pct >= 75.0 {
                         (4, theme.red)
                     } else if pct >= 50.0 {
@@ -584,7 +584,7 @@ fn render_session_list(
                     } else if pct >= 25.0 {
                         (2, theme.green)
                     } else {
-                        (1, theme.text_dim)
+                        (1, theme.green)
                     };
                     let empty = bar_w - filled;
 
