@@ -16,6 +16,22 @@ error() {
     exit 1
 }
 
+# --- Uninstall ---
+
+if [ "${1:-}" = "--uninstall" ]; then
+    if [ -f "${INSTALL_DIR}/${BINARY_NAME}" ]; then
+        rm -f "${INSTALL_DIR}/${BINARY_NAME}"
+        info "Removed ${INSTALL_DIR}/${BINARY_NAME}"
+    else
+        info "${BINARY_NAME} is not installed at ${INSTALL_DIR}/${BINARY_NAME}"
+    fi
+    if [ -d "$HOME/.agentick" ]; then
+        printf '  Config directory ~/.agentick/ was kept. Remove it manually if desired:\n'
+        printf '    rm -rf ~/.agentick\n'
+    fi
+    exit 0
+fi
+
 # --- Preflight checks ---
 
 command -v curl >/dev/null 2>&1 || error "curl is required but not found. Please install curl and try again."
