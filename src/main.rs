@@ -53,6 +53,7 @@ fn main() -> Result<()> {
         }
         None => {
             // Launch TUI
+
             if !tmux::client::tmux_available() {
                 eprintln!("Error: tmux is required but not found in PATH.");
                 eprintln!("Install it: brew install tmux");
@@ -78,5 +79,66 @@ fn main() -> Result<()> {
             );
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_no_args_is_none_command() {
+        let cli = Cli::try_parse_from(["agentick"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_list_subcommand() {
+        let cli = Cli::try_parse_from(["agentick", "list"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::List)));
+    }
+
+    #[test]
+    fn cli_add_with_defaults() {
+        let cli = Cli::try_parse_from(["agentick", "add", "/tmp/project"]).unwrap();
+        match cli.command {
+            Some(Commands::Add { path, tool }) => {
+                assert_eq!(path, "/tmp/project");
+                assert_eq!(tool, "claude"); // default
+            }
+            _ => panic!("expected Add command"),
+        }
+    }
+
+    #[test]
+    fn cli_add_with_tool_flag() {
+        let cli = Cli::try_parse_from(["agentick", "add", "/tmp/project", "--tool", "gemini"]).unwrap();
+        match cli.command {
+            Some(Commands::Add { path, tool }) => {
+                assert_eq!(path, "/tmp/project");
+                assert_eq!(tool, "gemini");
+            }
+            _ => panic!("expected Add command"),
+        }
+    }
+
+    #[test]
+    fn cli_add_with_short_tool_flag() {
+        let cli = Cli::try_parse_from(["agentick", "add", "/tmp/project", "-t", "codex"]).unwrap();
+        match cli.command {
+            Some(Commands::Add { tool, .. }) => assert_eq!(tool, "codex"),
+            _ => panic!("expected Add command"),
+        }
+    }
+
+    #[test]
+    fn cli_invalid_subcommand_errors() {
+        assert!(Cli::try_parse_from(["agentick", "nonexistent"]).is_err());
+    }
+
+    #[test]
+    fn cli_add_missing_path_errors() {
+        assert!(Cli::try_parse_from(["agentick", "add"]).is_err());
     }
 }

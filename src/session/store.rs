@@ -71,3 +71,105 @@ impl SessionStore {
         self.sessions.iter_mut().find(|s| s.id == id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::instance::{Session, Tool};
+    use std::path::PathBuf;
+
+    fn make_session(title: &str, tool: Tool) -> Session {
+        Session::new(title.into(), PathBuf::from("/tmp/test"), tool)
+    }
+
+    #[test]
+    fn default_store_is_empty() {
+        let store = SessionStore::default();
+        assert!(store.sessions.is_empty());
+    }
+
+    #[test]
+    fn add_session_appends() {
+        let mut store = SessionStore::default();
+        let s = make_session("one", Tool::Claude);
+        let id = s.id.clone();
+        store.add_session(s);
+        assert_eq!(store.sessions.len(), 1);
+        assert_eq!(store.sessions[0].id, id);
+    }
+
+    #[test]
+    fn remove_session_existing() {
+        let mut store = SessionStore::default();
+        let s = make_session("one", Tool::Claude);
+        let id = s.id.clone();
+        store.add_session(s);
+        let removed = store.remove_session(&id);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, id);
+        assert!(store.sessions.is_empty());
+    }
+
+    #[test]
+    fn remove_session_missing_returns_none() {
+        let mut store = SessionStore::default();
+        store.add_session(make_session("one", Tool::Claude));
+        assert!(store.remove_session("nonexistent").is_none());
+        assert_eq!(store.sessions.len(), 1);
+    }
+
+    #[test]
+    fn find_session_by_id() {
+        let mut store = SessionStore::default();
+        let s = make_session("target", Tool::Gemini);
+        let id = s.id.clone();
+        store.add_session(make_session("other", Tool::Claude));
+        store.add_session(s);
+
+        let found = store.find_session(&id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().title, "target");
+    }
+
+    #[test]
+    fn find_session_missing_returns_none() {
+        let store = SessionStore::default();
+        assert!(store.find_session("nope").is_none());
+    }
+
+    #[test]
+    fn find_session_mut_modifies() {
+        let mut store = SessionStore::default();
+        let s = make_session("mutable", Tool::Codex);
+        let id = s.id.clone();
+        store.add_session(s);
+
+        let found = store.find_session_mut(&id).unwrap();
+        found.title = "modified".into();
+        assert_eq!(store.sessions[0].title, "modified");
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("sessions.json");
+
+        let mut store = SessionStore::default();
+        store.add_session(make_session("alpha", Tool::Claude));
+        store.add_session(make_session("beta", Tool::Gemini));
+
+        // Save manually to the temp path.
+        let json = serde_json::to_string_pretty(&store).unwrap();
+        std::fs::write(&store_path, &json).unwrap();
+
+        // Load back.
+        let content = std::fs::read_to_string(&store_path).unwrap();
+        let loaded: SessionStore = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(loaded.sessions.len(), 2);
+        assert_eq!(loaded.sessions[0].title, "alpha");
+        assert_eq!(loaded.sessions[1].title, "beta");
+        // Status is serde(skip) — should default to Idle.
+        assert_eq!(loaded.sessions[0].status, crate::session::instance::Status::Idle);
+    }
+}

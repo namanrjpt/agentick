@@ -355,4 +355,150 @@ mod tests {
         assert!(s.tmux_name.starts_with("agentick_"));
         assert!(s.tmux_name.contains("my-cool-project"));
     }
+
+    #[test]
+    fn serde_roundtrip_status_is_skipped() {
+        let mut s = Session::new("roundtrip".into(), PathBuf::from("/tmp"), Tool::Claude);
+        s.status = Status::Active;
+        s.context_used = Some(50_000);
+        s.model = Some("claude-opus-4-6".into());
+        s.cost_usd = Some(0.42);
+
+        let json = serde_json::to_string(&s).unwrap();
+        // status should NOT appear in serialised JSON
+        assert!(!json.contains("\"active\"") || !json.contains("\"status\""));
+
+        let loaded: Session = serde_json::from_str(&json).unwrap();
+        // status defaults to Idle (serde skip default)
+        assert_eq!(loaded.status, Status::Idle);
+        // other fields survive
+        assert_eq!(loaded.title, "roundtrip");
+        assert_eq!(loaded.context_used, Some(50_000));
+        assert_eq!(loaded.model.as_deref(), Some("claude-opus-4-6"));
+        assert!((loaded.cost_usd.unwrap() - 0.42).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn context_percentage_zero_limit() {
+        let mut s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Shell);
+        s.context_used = Some(100);
+        s.context_limit = 0;
+        assert!(s.context_percentage().is_none());
+    }
+
+    #[test]
+    fn new_fork_inherits_parent_data() {
+        let mut parent = Session::new("parent".into(), PathBuf::from("/proj"), Tool::Claude);
+        parent.context_used = Some(80_000);
+        parent.model = Some("claude-opus-4-6".into());
+
+        let fork = Session::new_fork(&parent);
+        assert_eq!(fork.forked_from.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(fork.context_used, Some(80_000));
+        assert_eq!(fork.model.as_deref(), Some("claude-opus-4-6"));
+        assert!(fork.title.contains("fork"));
+        assert_eq!(fork.project_path, parent.project_path);
+    }
+
+    #[test]
+    fn tool_default_command_all_variants() {
+        assert!(Tool::Claude.default_command().contains("claude"));
+        assert_eq!(Tool::Gemini.default_command(), "gemini");
+        assert_eq!(Tool::Codex.default_command(), "codex");
+        assert_eq!(Tool::OpenCode.default_command(), "opencode");
+        assert_eq!(Tool::Cursor.default_command(), "cursor-agent");
+        assert_eq!(Tool::Aider.default_command(), "aider");
+        assert_eq!(Tool::Vibe.default_command(), "vibe");
+        assert_eq!(Tool::Shell.default_command(), "bash");
+        assert_eq!(Tool::Custom("mytool".into()).default_command(), "mytool");
+    }
+
+    #[test]
+    fn short_path_replaces_home() {
+        let s = Session::new("test".into(), PathBuf::from("/tmp/not-home"), Tool::Claude);
+        // /tmp/not-home won't match $HOME, so it should stay as-is
+        assert_eq!(s.short_path(), "/tmp/not-home");
+    }
+
+    #[test]
+    fn tool_icon_returns_non_empty_string() {
+        let tools = [
+            Tool::Claude, Tool::Gemini, Tool::Codex, Tool::OpenCode,
+            Tool::Cursor, Tool::Aider, Tool::Vibe, Tool::Shell,
+            Tool::Custom("foo".into()),
+        ];
+        for tool in &tools {
+            let icon = tool.icon();
+            assert!(!icon.is_empty(), "icon empty for {:?}", tool);
+            assert_eq!(icon.chars().count(), 1, "icon should be single char for {:?}", tool);
+        }
+    }
+
+    #[test]
+    fn tool_default_context_limit_varies() {
+        // Gemini has a larger context than Claude.
+        assert!(Tool::Gemini.default_context_limit() > Tool::Claude.default_context_limit());
+        // Shell has 0 context.
+        assert_eq!(Tool::Shell.default_context_limit(), 0);
+    }
+
+    #[test]
+    fn status_display_all_variants() {
+        assert_eq!(Status::Active.to_string(), "active");
+        assert_eq!(Status::Waiting.to_string(), "waiting");
+        assert_eq!(Status::Done.to_string(), "done");
+        assert_eq!(Status::Idle.to_string(), "idle");
+        assert_eq!(Status::Dead.to_string(), "dead");
+    }
+
+    #[test]
+    fn status_default_is_idle() {
+        assert_eq!(Status::default(), Status::Idle);
+    }
+
+    #[test]
+    fn age_display_recent_shows_seconds() {
+        let mut s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Claude);
+        s.last_activity = Some(chrono::Utc::now().timestamp());
+        let display = s.age_display();
+        assert!(display.contains("s ago"), "expected seconds, got: {}", display);
+    }
+
+    #[test]
+    fn age_display_no_activity_uses_created_at() {
+        let s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Claude);
+        // Just created — should show seconds.
+        let display = s.age_display();
+        assert!(display.contains("s ago"), "expected seconds, got: {}", display);
+    }
+
+    #[test]
+    fn session_new_sets_dead_status() {
+        let s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Claude);
+        assert_eq!(s.status, Status::Dead);
+    }
+
+    #[test]
+    fn tool_display_custom_lowercases() {
+        assert_eq!(Tool::Custom("MyTool".into()).to_string(), "mytool");
+        assert_eq!(Tool::Custom("ALL_CAPS".into()).to_string(), "all_caps");
+    }
+
+    #[test]
+    fn context_percentage_100_percent() {
+        let mut s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Claude);
+        s.context_used = Some(200_000);
+        s.context_limit = 200_000;
+        let pct = s.context_percentage().unwrap();
+        assert!((pct - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn context_percentage_over_100() {
+        let mut s = Session::new("test".into(), PathBuf::from("/tmp"), Tool::Claude);
+        s.context_used = Some(300_000);
+        s.context_limit = 200_000;
+        let pct = s.context_percentage().unwrap();
+        assert!(pct > 100.0);
+    }
 }

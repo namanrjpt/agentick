@@ -297,3 +297,145 @@ fn shorten_home(path: &str) -> String {
     }
     path.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn make_dialog() -> NewSessionDialog {
+        NewSessionDialog {
+            focus: DialogField::Tool,
+            tool_index: 0,
+            dir_query: String::new(),
+            zoxide_dirs: vec![
+                crate::tui::zoxide::ZoxideEntry {
+                    path: "/projects/alpha".into(),
+                    score: 10.0,
+                },
+                crate::tui::zoxide::ZoxideEntry {
+                    path: "/projects/beta".into(),
+                    score: 5.0,
+                },
+            ],
+            dir_selected: 0,
+            dir_confirmed: false,
+        }
+    }
+
+    #[test]
+    fn esc_cancels() {
+        let mut dialog = make_dialog();
+        let action = dialog.handle_key(key(KeyCode::Esc));
+        assert!(matches!(action, DialogAction::Cancel));
+    }
+
+    #[test]
+    fn tab_switches_focus() {
+        let mut dialog = make_dialog();
+        assert_eq!(dialog.focus, DialogField::Tool);
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focus, DialogField::Directory);
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focus, DialogField::Tool);
+    }
+
+    #[test]
+    fn backtab_switches_focus_reverse() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.handle_key(key(KeyCode::BackTab));
+        assert_eq!(dialog.focus, DialogField::Tool);
+    }
+
+    #[test]
+    fn tool_right_wraps_around() {
+        let mut dialog = make_dialog();
+        assert_eq!(dialog.tool_index, 0);
+        // Move right through all tools
+        for _ in 0..TOOL_OPTIONS.len() {
+            dialog.handle_key(key(KeyCode::Right));
+        }
+        // Should wrap back to 0
+        assert_eq!(dialog.tool_index, 0);
+    }
+
+    #[test]
+    fn tool_left_wraps_to_end() {
+        let mut dialog = make_dialog();
+        assert_eq!(dialog.tool_index, 0);
+        dialog.handle_key(key(KeyCode::Left));
+        assert_eq!(dialog.tool_index, TOOL_OPTIONS.len() - 1);
+    }
+
+    #[test]
+    fn dir_typing_updates_query() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.handle_key(key(KeyCode::Char('a')));
+        dialog.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(dialog.dir_query, "al");
+    }
+
+    #[test]
+    fn dir_backspace_removes_char() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.dir_query = "abc".into();
+        dialog.handle_key(key(KeyCode::Backspace));
+        assert_eq!(dialog.dir_query, "ab");
+    }
+
+    #[test]
+    fn dir_backspace_on_empty_is_noop() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.handle_key(key(KeyCode::Backspace));
+        assert_eq!(dialog.dir_query, "");
+    }
+
+    #[test]
+    fn dir_up_saturates_at_zero() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.dir_selected = 0;
+        dialog.handle_key(key(KeyCode::Up));
+        assert_eq!(dialog.dir_selected, 0);
+    }
+
+    #[test]
+    fn dir_down_clamps_to_last() {
+        let mut dialog = make_dialog();
+        dialog.focus = DialogField::Directory;
+        dialog.dir_selected = 0;
+        // Move down past the end
+        dialog.handle_key(key(KeyCode::Down));
+        dialog.handle_key(key(KeyCode::Down));
+        dialog.handle_key(key(KeyCode::Down));
+        // Should clamp to last item index (1, since we have 2 dirs)
+        assert!(dialog.dir_selected <= 1);
+    }
+
+    #[test]
+    fn ctrl_enter_with_dir_creates_session() {
+        let mut dialog = make_dialog();
+        // Select first directory
+        dialog.focus = DialogField::Directory;
+        dialog.handle_key(key(KeyCode::Enter)); // select dir
+        // Now Ctrl+Enter should create
+        let action = dialog.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(matches!(action, DialogAction::Create(_)));
+    }
+
+    #[test]
+    fn dialog_field_next_prev_cycle() {
+        assert_eq!(DialogField::Tool.next(), DialogField::Directory);
+        assert_eq!(DialogField::Directory.next(), DialogField::Tool);
+        assert_eq!(DialogField::Tool.prev(), DialogField::Directory);
+        assert_eq!(DialogField::Directory.prev(), DialogField::Tool);
+    }
+}

@@ -142,4 +142,95 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn map_tab() {
+        match map_key(&key(KeyCode::Tab)) {
+            TmuxKey::Special(s) => assert_eq!(s, "Tab"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_backtab() {
+        match map_key(&key(KeyCode::BackTab)) {
+            TmuxKey::Special(s) => assert_eq!(s, "BTab"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_escape() {
+        match map_key(&key(KeyCode::Esc)) {
+            TmuxKey::Special(s) => assert_eq!(s, "Escape"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_delete() {
+        match map_key(&key(KeyCode::Delete)) {
+            TmuxKey::Special(s) => assert_eq!(s, "DC"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_home_end() {
+        match map_key(&key(KeyCode::Home)) {
+            TmuxKey::Special(s) => assert_eq!(s, "Home"),
+            _ => panic!("expected Special"),
+        }
+        match map_key(&key(KeyCode::End)) {
+            TmuxKey::Special(s) => assert_eq!(s, "End"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_page_up_down() {
+        match map_key(&key(KeyCode::PageUp)) {
+            TmuxKey::Special(s) => assert_eq!(s, "PageUp"),
+            _ => panic!("expected Special"),
+        }
+        match map_key(&key(KeyCode::PageDown)) {
+            TmuxKey::Special(s) => assert_eq!(s, "PageDown"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_insert() {
+        match map_key(&key(KeyCode::Insert)) {
+            TmuxKey::Special(s) => assert_eq!(s, "IC"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_alt_key() {
+        let k = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        match map_key(&k) {
+            TmuxKey::Special(s) => assert_eq!(s, "M-x"),
+            _ => panic!("expected Special"),
+        }
+    }
+
+    #[test]
+    fn map_shift_space() {
+        let k = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT);
+        match map_key(&k) {
+            TmuxKey::RawHex(s) => assert_eq!(s, "1b 5b 33 32 3b 32 75"),
+            _ => panic!("expected RawHex"),
+        }
+    }
+
+    #[test]
+    fn map_unknown_key_returns_ignore() {
+        // CapsLock/Modifier-only keys → Ignore
+        match map_key(&key(KeyCode::CapsLock)) {
+            TmuxKey::Ignore => {}
+            _ => panic!("expected Ignore"),
+        }
+    }
 }

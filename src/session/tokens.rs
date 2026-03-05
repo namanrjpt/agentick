@@ -1590,4 +1590,145 @@ mod tests {
         let hash = compute_md5_hex("/Users/naman/Documents/work-brain");
         assert_eq!(hash, "605df61177d4441b5d46bf808d2e8aab");
     }
+
+    // -- extract_first_user_message (Claude) ----------------------------------
+
+    #[test]
+    fn extract_first_user_message_valid() {
+        let content = r#"{"type":"user","message":{"role":"user","content":"implement the quick create feature for sessions"}}
+{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let msg = extract_first_user_message(&path).unwrap();
+        assert_eq!(msg, "implement the quick create feature...");
+    }
+
+    #[test]
+    fn extract_first_user_message_short_message() {
+        let content = r#"{"type":"user","message":{"role":"user","content":"fix bug"}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let msg = extract_first_user_message(&path).unwrap();
+        assert_eq!(msg, "fix bug");
+    }
+
+    #[test]
+    fn extract_first_user_message_skips_trivial() {
+        // Messages under 5 chars should be skipped (e.g. "hi", "ok")
+        let content = r#"{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"user","message":{"role":"user","content":"please implement the feature"}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let msg = extract_first_user_message(&path).unwrap();
+        assert_eq!(msg, "please implement the feature");
+    }
+
+    #[test]
+    fn extract_first_user_message_no_users() {
+        let content = r#"{"type":"assistant","message":{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        assert!(extract_first_user_message(&path).is_none());
+    }
+
+    #[test]
+    fn extract_first_user_message_content_array() {
+        // Claude sometimes uses array content format
+        let content = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"refactor the authentication module completely"}]}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let msg = extract_first_user_message(&path).unwrap();
+        assert_eq!(msg, "refactor the authentication module completely");
+    }
+
+    // -- parse_claude_jsonl edge cases ----------------------------------------
+
+    #[test]
+    fn parse_claude_jsonl_skips_partial_first_line() {
+        // Simulate a tail-read that starts mid-line.
+        let content = r#"partial json that doesn't start with {
+{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":42,"output_tokens":8}}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let mut cache = TokenCache::new();
+        let data = parse_claude_jsonl(&path, &mut cache).unwrap();
+        assert_eq!(data.context_used, Some(42));
+    }
+
+    #[test]
+    fn parse_claude_jsonl_malformed_json_line_skipped() {
+        let content = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":5}}}
+{this is not valid json}
+{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":99,"output_tokens":1}}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, content).unwrap();
+
+        let mut cache = TokenCache::new();
+        let data = parse_claude_jsonl(&path, &mut cache).unwrap();
+        // Should use the last valid assistant message.
+        assert_eq!(data.context_used, Some(99));
+    }
+
+    #[test]
+    fn parse_claude_jsonl_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+
+        let mut cache = TokenCache::new();
+        assert!(parse_claude_jsonl(&path, &mut cache).is_none());
+    }
+
+    // -- parse_gemini_session_json edge cases ----------------------------------
+
+    #[test]
+    fn parse_gemini_session_missing_model() {
+        let json = r#"{ "usage": { "input_tokens": 100, "output_tokens": 50 } }"#;
+        // No "model" field — still returns Some because context_used is present.
+        let data = parse_gemini_session_json(json).unwrap();
+        assert!(data.model.is_none());
+        assert_eq!(data.context_used, Some(150));
+    }
+
+    // -- TokenData default ----------------------------------------------------
+
+    #[test]
+    fn token_data_default_all_none() {
+        let td = TokenData::default();
+        assert!(td.context_used.is_none());
+        assert!(td.model.is_none());
+        assert!(td.cost_usd.is_none());
+    }
+
+    // -- hex_val edge cases ---------------------------------------------------
+
+    #[test]
+    fn hex_decode_uppercase() {
+        assert_eq!(hex_decode("4F6B"), Some(b"Ok".to_vec()));
+    }
+
+    #[test]
+    fn hex_decode_mixed_case() {
+        assert_eq!(hex_decode("4f6B"), Some(b"Ok".to_vec()));
+    }
 }

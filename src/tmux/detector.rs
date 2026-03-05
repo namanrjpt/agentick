@@ -574,4 +574,129 @@ mod tests {
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Done);
     }
+
+    // -- Priority 2: Edge cases -----------------------------------------------
+
+    #[test]
+    fn spinner_grace_period_keeps_active() {
+        // Spinner was seen 2 seconds ago, no busy/prompt now → still Active.
+        let now = Instant::now();
+        let ctx = DetectionContext {
+            tool: &Tool::Claude,
+            pane_title: Some("claude"),
+            pane_content: Some("Some output with no indicators"),
+            hook_status: None,
+            activity_changed_at: Some(now),
+            spinner_last_seen: Some(now - Duration::from_secs(2)),
+            sustained_activity_count: 0,
+            now,
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Active);
+    }
+
+    #[test]
+    fn spinner_grace_period_expired_falls_through() {
+        // Spinner was seen 10 seconds ago — grace expired → should detect prompt.
+        let now = Instant::now();
+        let ctx = DetectionContext {
+            tool: &Tool::Claude,
+            pane_title: Some("claude"),
+            pane_content: Some("Done.\n>"),
+            hook_status: None,
+            activity_changed_at: Some(now),
+            spinner_last_seen: Some(now - Duration::from_secs(10)),
+            sustained_activity_count: 0,
+            now,
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Waiting);
+    }
+
+    #[test]
+    fn stale_activity_becomes_idle() {
+        // Activity was 2 minutes ago, no other signals → Idle.
+        let now = Instant::now();
+        let ctx = DetectionContext {
+            tool: &Tool::Claude,
+            pane_title: None,
+            pane_content: None,
+            hook_status: None,
+            activity_changed_at: Some(now - Duration::from_secs(120)),
+            spinner_last_seen: None,
+            sustained_activity_count: 0,
+            now,
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Idle);
+    }
+
+    #[test]
+    fn custom_tool_uses_generic_detection() {
+        // Custom tool should match generic shell prompt patterns.
+        let lines = vec!["output", "user@host:~$ "];
+        assert!(has_prompt_indicator(&Tool::Custom("mytool".into()), &lines));
+    }
+
+    #[test]
+    fn custom_tool_no_busy_patterns() {
+        // Custom tools have no tool-specific busy patterns.
+        let lines = vec!["just text", "nothing special"];
+        assert!(!has_busy_indicator(&Tool::Custom("mytool".into()), &lines));
+    }
+
+    #[test]
+    fn shell_prompt_zsh_percent() {
+        let lines = vec!["user@host ~/project%"];
+        assert!(has_prompt_indicator(&Tool::Shell, &lines));
+    }
+
+    #[test]
+    fn aider_prompt_detected() {
+        let lines = vec!["output", ">"];
+        assert!(has_prompt_indicator(&Tool::Aider, &lines));
+    }
+
+    #[test]
+    fn aider_prompt_with_space() {
+        let lines = vec!["> aider command"];
+        assert!(has_prompt_indicator(&Tool::Aider, &lines));
+    }
+
+    #[test]
+    fn sustained_activity_non_tui_tool_active() {
+        // Non-TUI tool with sustained activity → Active.
+        let now = Instant::now();
+        let ctx = DetectionContext {
+            tool: &Tool::Claude,
+            pane_title: None,
+            pane_content: None,
+            hook_status: None,
+            activity_changed_at: Some(now),
+            spinner_last_seen: None,
+            sustained_activity_count: 5,
+            now,
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Active);
+    }
+
+    #[test]
+    fn cursor_tui_blink_excluded_from_sustained() {
+        // Cursor tool with high sustained activity should NOT be Active
+        // (TUI cursor blink excluded from Layer 5).
+        let now = Instant::now();
+        let ctx = DetectionContext {
+            tool: &Tool::Cursor,
+            pane_title: None,
+            pane_content: None,
+            hook_status: None,
+            activity_changed_at: Some(now),
+            spinner_last_seen: None,
+            sustained_activity_count: 20,
+            now,
+        };
+        let result = detect_status(&ctx);
+        assert_eq!(result.status, Status::Done);
+    }
 }

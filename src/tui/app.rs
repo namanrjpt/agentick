@@ -1768,3 +1768,61 @@ pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn normalize_shift_lowercase_to_uppercase() {
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::SHIFT);
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Char('N'));
+        assert!(!result.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn normalize_shift_already_uppercase_no_change() {
+        let key = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE);
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Char('N'));
+        assert_eq!(result.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn normalize_no_shift_lowercase_unchanged() {
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Char('n'));
+        assert_eq!(result.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn normalize_shift_non_alpha_unchanged() {
+        let key = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Char('1'));
+        assert!(result.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn normalize_non_char_key_unchanged() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Enter);
+        assert!(result.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn normalize_ctrl_shift_preserves_ctrl() {
+        let key = KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+        );
+        let result = normalize_shift_char(key);
+        assert_eq!(result.code, KeyCode::Char('A'));
+        assert!(result.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(!result.modifiers.contains(KeyModifiers::SHIFT));
+    }
+}

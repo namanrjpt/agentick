@@ -79,3 +79,72 @@ pub fn tool_color(tool: &str) -> Color {
         _ => t.text,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dark_theme_returns_distinct_colors() {
+        let t = dark_theme();
+        // Key colors should be distinct from each other.
+        assert_ne!(t.bg, t.text);
+        assert_ne!(t.accent, t.text_dim);
+        assert_ne!(t.green, t.red);
+    }
+
+    #[test]
+    fn status_color_active() {
+        let t = dark_theme();
+        assert_eq!(status_color("active"), t.green);
+    }
+
+    #[test]
+    fn status_color_waiting() {
+        let t = dark_theme();
+        assert_eq!(status_color("waiting"), t.yellow);
+    }
+
+    #[test]
+    fn status_color_done() {
+        let t = dark_theme();
+        assert_eq!(status_color("done"), t.green);
+    }
+
+    #[test]
+    fn status_color_idle() {
+        let t = dark_theme();
+        assert_eq!(status_color("idle"), t.text_dim);
+    }
+
+    #[test]
+    fn status_color_dead() {
+        let t = dark_theme();
+        assert_eq!(status_color("dead"), t.red);
+    }
+
+    #[test]
+    fn status_color_unknown_fallback() {
+        let t = dark_theme();
+        assert_eq!(status_color("nonexistent"), t.text_dim);
+    }
+
+    #[test]
+    fn tool_color_all_known_tools() {
+        let t = dark_theme();
+        assert_eq!(tool_color("claude"), t.orange);
+        assert_eq!(tool_color("gemini"), t.purple);
+        assert_eq!(tool_color("codex"), t.cyan);
+        assert_eq!(tool_color("opencode"), t.accent);
+        assert_eq!(tool_color("cursor"), t.green);
+        assert_eq!(tool_color("aider"), t.yellow);
+        assert_eq!(tool_color("vibe"), t.red);
+        assert_eq!(tool_color("shell"), t.text_dim);
+    }
+
+    #[test]
+    fn tool_color_unknown_fallback() {
+        let t = dark_theme();
+        assert_eq!(tool_color("unknowntool"), t.text);
+    }
+}

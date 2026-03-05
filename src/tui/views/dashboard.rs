@@ -1166,3 +1166,164 @@ pub fn search_display_indices(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::instance::{Session, Status, Tool};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn make_session(title: &str, path: &str, tool: Tool) -> Session {
+        Session::new(title.into(), PathBuf::from(path), tool)
+    }
+
+    fn make_sessions() -> Vec<Session> {
+        vec![
+            make_session("alpha", "/projects/web", Tool::Claude),
+            make_session("beta", "/projects/web", Tool::Gemini),
+            make_session("gamma", "/projects/api", Tool::Codex),
+        ]
+    }
+
+    #[test]
+    fn display_item_count_no_filter() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        // 2 group headers + 3 sessions = 5
+        let count = display_item_count(&sessions, &collapsed, None);
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn display_item_count_collapsed_group() {
+        let sessions = make_sessions();
+        let mut collapsed = HashSet::new();
+        collapsed.insert("/projects/web".to_string());
+        // web group collapsed: 1 header, 0 sessions. api: 1 header, 1 session = 3
+        let count = display_item_count(&sessions, &collapsed, None);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn display_item_count_all_collapsed() {
+        let sessions = make_sessions();
+        let mut collapsed = HashSet::new();
+        collapsed.insert("/projects/web".to_string());
+        collapsed.insert("/projects/api".to_string());
+        // Just 2 group headers
+        let count = display_item_count(&sessions, &collapsed, None);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn is_group_header_at_index_zero() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        assert!(is_group_header(&sessions, &collapsed, 0, None));
+    }
+
+    #[test]
+    fn is_group_header_at_session_index() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        // Index 1 should be the first session under the first group header.
+        assert!(!is_group_header(&sessions, &collapsed, 1, None));
+    }
+
+    #[test]
+    fn find_selected_session_on_header_returns_none() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        assert!(find_selected_session(&sessions, &collapsed, 0, None).is_none());
+    }
+
+    #[test]
+    fn find_selected_session_on_session_row() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        // Index 1 = first session under first group
+        let found = find_selected_session(&sessions, &collapsed, 1, None);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().title, "alpha");
+    }
+
+    #[test]
+    fn find_selected_session_out_of_range() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        assert!(find_selected_session(&sessions, &collapsed, 99, None).is_none());
+    }
+
+    #[test]
+    fn find_session_display_index_existing() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        let target_id = &sessions[2].id; // gamma
+        let idx = find_session_display_index(&sessions, &collapsed, target_id, None);
+        assert!(idx.is_some());
+        // gamma is in the api group: group header at idx 3, gamma at idx 4
+        assert_eq!(idx.unwrap(), 4);
+    }
+
+    #[test]
+    fn find_session_display_index_missing() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        assert!(find_session_display_index(&sessions, &collapsed, "nonexistent", None).is_none());
+    }
+
+    #[test]
+    fn search_display_indices_empty_query() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        let indices = search_display_indices(&sessions, &collapsed, "", None);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn search_display_indices_matches_title() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        let indices = search_display_indices(&sessions, &collapsed, "alpha", None);
+        assert_eq!(indices.len(), 1);
+    }
+
+    #[test]
+    fn search_display_indices_case_insensitive() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        let indices = search_display_indices(&sessions, &collapsed, "BETA", None);
+        assert_eq!(indices.len(), 1);
+    }
+
+    #[test]
+    fn search_display_indices_no_match() {
+        let sessions = make_sessions();
+        let collapsed = HashSet::new();
+        let indices = search_display_indices(&sessions, &collapsed, "zzzznotfound", None);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn display_items_with_forks() {
+        let mut sessions = make_sessions();
+        let mut fork = make_session("alpha-fork", "/projects/web", Tool::Claude);
+        fork.forked_from = Some(sessions[0].id.clone());
+        sessions.push(fork);
+
+        let collapsed = HashSet::new();
+        // web group: header + alpha + alpha-fork + beta = 4 items for web
+        // api group: header + gamma = 2 items
+        // total = 6
+        let count = display_item_count(&sessions, &collapsed, None);
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn display_item_count_empty_sessions() {
+        let sessions: Vec<Session> = vec![];
+        let collapsed = HashSet::new();
+        assert_eq!(display_item_count(&sessions, &collapsed, None), 0);
+    }
+}

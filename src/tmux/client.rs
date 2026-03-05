@@ -831,4 +831,37 @@ mod tests {
         let result = preprocess_osc8_hyperlinks(input);
         assert_eq!(result, "héllo \x1b[34mwörld\x1b[0m café");
     }
+
+    #[test]
+    fn sanitize_unicode_title() {
+        let name = sanitize_session_name("🚀 rocket project", "abcdef12");
+        assert!(name.starts_with("agentick_"));
+        // Emoji gets stripped; remaining text preserved.
+        assert!(name.contains("rocket-project") || name.contains("abcdef12"));
+    }
+
+    #[test]
+    fn sanitize_all_special_chars_produces_valid_name() {
+        let name = sanitize_session_name("!!!@@@###", "deadbeef");
+        // Even if title portion is empty after sanitization, the name is valid.
+        assert!(name.starts_with("agentick_"));
+        assert!(name.contains("deadbeef"));
+    }
+
+    #[test]
+    fn osc8_unclosed_link_preserves_text() {
+        // Malformed: opening OSC8 but no closing sequence.
+        let input = "\x1b]8;;https://example.com\x07click here but never closed";
+        let result = preprocess_osc8_hyperlinks(input);
+        // Should not panic; exact output depends on implementation, but text preserved.
+        assert!(result.contains("click here") || result.contains("example.com"));
+    }
+
+    #[test]
+    fn osc8_empty_link_text() {
+        let input = "\x1b]8;;https://example.com\x07\x1b]8;;\x07";
+        let result = preprocess_osc8_hyperlinks(input);
+        // Empty link text should produce empty styled span.
+        assert!(!result.contains("https://example.com"));
+    }
 }

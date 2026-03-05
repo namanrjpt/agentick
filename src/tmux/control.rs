@@ -252,4 +252,26 @@ mod tests {
         let result = unescape_tmux_octal("hi\\033[0m\\012\\\\done");
         assert_eq!(result, b"hi\x1b[0m\n\\done");
     }
+
+    #[test]
+    fn unescape_trailing_backslash() {
+        // Lone backslash at end of string — should not panic.
+        let result = unescape_tmux_octal("hello\\");
+        // At minimum "hello" is preserved.
+        assert!(result.len() >= 5);
+    }
+
+    #[test]
+    fn unescape_partial_octal() {
+        // Only 2 digits after backslash — not a full 3-digit octal.
+        let result = unescape_tmux_octal("a\\01b");
+        let as_str = String::from_utf8_lossy(&result);
+        assert!(as_str.contains('a') && as_str.contains('b'));
+    }
+
+    #[test]
+    fn unescape_empty_string() {
+        let result = unescape_tmux_octal("");
+        assert!(result.is_empty());
+    }
 }
