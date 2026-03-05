@@ -10,9 +10,10 @@ use unicode_width::UnicodeWidthStr;
 
 use std::path::PathBuf;
 
-use crate::session::instance::{Session, Status};
+use crate::session::instance::{Session, Status, Tool};
 use crate::tui::app::FocusPane;
 use crate::tui::theme::{dark_theme, status_color, tool_color, Theme};
+use crate::tui::views::search;
 
 // ---------------------------------------------------------------------------
 // Inline new-session render state (passed from app.rs)
@@ -30,8 +31,8 @@ pub struct InlineNewRenderState<'a> {
 // Quick-create key map
 // ---------------------------------------------------------------------------
 
-/// (key, display_label, command_name) for the which-key quick-create sheet.
-pub const QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
+/// All known quick-create keys: (key, display_label, command_name).
+const ALL_QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
     ('c', "Claude", "claude"),
     ('x', "Codex", "codex"),
     ('g', "Gemini", "gemini"),
@@ -41,6 +42,15 @@ pub const QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
     ('s', "Shell", "shell"),
     ('o', "OpenCode", "opencode"),
 ];
+
+/// Return only quick-create keys whose CLI binary is available in PATH.
+pub fn available_quick_create_keys() -> Vec<(char, &'static str, &'static str)> {
+    ALL_QUICK_CREATE_KEYS
+        .iter()
+        .filter(|(_, _, cmd)| Tool::from_command(cmd).is_available())
+        .copied()
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Display item -- either a group header or a session row in the flat list
@@ -89,6 +99,7 @@ pub fn render_dashboard(
     inline_new: Option<&InlineNewRenderState<'_>>,
     search_matches: &HashSet<usize>,
     confirm_delete_id: Option<&str>,
+    search_state: Option<(&str, usize)>, // (query, result_count) when search is active
 ) {
     let theme = dark_theme();
 
@@ -134,13 +145,43 @@ pub fn render_dashboard(
             ])
             .split(chunks[1]);
 
-        render_session_list(frame, &items, selected, tick_count, h_chunks[0], &theme, rename_state, inline_new, search_matches, confirm_delete_id);
+        // Split left panel for search bar when active.
+        let (search_area, list_area) = if search_state.is_some() {
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(h_chunks[0]);
+            (Some(v[0]), v[1])
+        } else {
+            (None, h_chunks[0])
+        };
+
+        if let (Some(bar_area), Some((query, count))) = (search_area, search_state) {
+            search::render_search_bar(frame, query, count, bar_area);
+        }
+
+        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
             scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
         );
     } else {
-        render_session_list(frame, &items, selected, tick_count, chunks[1], &theme, rename_state, inline_new, search_matches, confirm_delete_id);
+        // Narrow layout: search bar above the full-width session list.
+        let (search_area, list_area) = if search_state.is_some() {
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(chunks[1]);
+            (Some(v[0]), v[1])
+        } else {
+            (None, chunks[1])
+        };
+
+        if let (Some(bar_area), Some((query, count))) = (search_area, search_state) {
+            search::render_search_bar(frame, query, count, bar_area);
+        }
+
+        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -922,7 +963,12 @@ pub fn render_confirm_dialog(frame: &mut Frame, message: &str, area: Rect) {
 // ---------------------------------------------------------------------------
 
 /// Render a 3-line which-key overlay anchored to the bottom of the screen.
-pub fn render_quick_create_sheet(frame: &mut Frame, project_path: &Path, area: Rect) {
+pub fn render_quick_create_sheet(
+    frame: &mut Frame,
+    project_path: &Path,
+    area: Rect,
+    quick_keys: &[(char, &str, &str)],
+) {
     let theme = dark_theme();
 
     let sheet_height: u16 = 3;
@@ -957,7 +1003,7 @@ pub fn render_quick_create_sheet(frame: &mut Frame, project_path: &Path, area: R
 
     // Line 2: key-action pairs
     let mut line2_spans: Vec<Span> = vec![Span::raw(" ")];
-    for (key, label, cmd) in QUICK_CREATE_KEYS {
+    for (key, label, cmd) in quick_keys {
         line2_spans.push(Span::styled(
             format!("{}", key),
             Style::default()

@@ -83,6 +83,33 @@ impl Tool {
         }
     }
 
+    /// The binary name to check for availability in PATH.
+    pub fn binary_name(&self) -> &str {
+        match self {
+            Tool::Claude => "claude",
+            Tool::Gemini => "gemini",
+            Tool::Codex => "codex",
+            Tool::OpenCode => "opencode",
+            Tool::Cursor => "cursor-agent",
+            Tool::Aider => "aider",
+            Tool::Vibe => "vibe",
+            Tool::Shell => "bash",
+            Tool::Custom(name) => name.as_str(),
+        }
+    }
+
+    /// Check if the tool's binary is available in PATH.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Tool::Shell)
+            || std::process::Command::new("which")
+                .arg(self.binary_name())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+    }
+
     /// Sensible default context window size per tool.
     fn default_context_limit(&self) -> u64 {
         match self {

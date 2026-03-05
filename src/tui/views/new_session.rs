@@ -15,8 +15,8 @@ use crate::tui::zoxide;
 // Constants & types
 // ---------------------------------------------------------------------------
 
-/// Available tool options: (display name, command key).
-pub const TOOL_OPTIONS: &[(&str, &str)] = &[
+/// All known tool options: (display name, command key).
+const ALL_TOOL_OPTIONS: &[(&str, &str)] = &[
     ("Claude", "claude"),
     ("Gemini", "gemini"),
     ("Codex", "codex"),
@@ -26,6 +26,15 @@ pub const TOOL_OPTIONS: &[(&str, &str)] = &[
     ("Vibe", "vibe"),
     ("Shell", "shell"),
 ];
+
+/// Return only tool options whose CLI binary is available in PATH.
+pub fn available_tool_options() -> Vec<(&'static str, &'static str)> {
+    ALL_TOOL_OPTIONS
+        .iter()
+        .filter(|(_, cmd)| Tool::from_command(cmd).is_available())
+        .copied()
+        .collect()
+}
 
 const MAX_DIR_RESULTS: usize = 5;
 
@@ -64,6 +73,8 @@ pub struct NewSessionDialog {
     pub zoxide_dirs: Vec<zoxide::ZoxideEntry>,
     pub dir_selected: usize,
     dir_confirmed: bool,
+    /// Filtered tool options (only tools whose binary is in PATH).
+    pub tool_options: Vec<(&'static str, &'static str)>,
 }
 
 impl NewSessionDialog {
@@ -75,6 +86,7 @@ impl NewSessionDialog {
             zoxide_dirs: zoxide::load_zoxide_dirs(),
             dir_selected: 0,
             dir_confirmed: false,
+            tool_options: available_tool_options(),
         }
     }
 
@@ -103,15 +115,20 @@ impl NewSessionDialog {
     }
 
     fn handle_tool_key(&mut self, key: KeyEvent) -> DialogAction {
+        let len = self.tool_options.len();
         match key.code {
             KeyCode::Left => {
                 self.tool_index = if self.tool_index == 0 {
-                    TOOL_OPTIONS.len() - 1
+                    len.saturating_sub(1)
                 } else {
                     self.tool_index - 1
                 };
             }
-            KeyCode::Right => self.tool_index = (self.tool_index + 1) % TOOL_OPTIONS.len(),
+            KeyCode::Right => {
+                if len > 0 {
+                    self.tool_index = (self.tool_index + 1) % len;
+                }
+            }
             _ => {}
         }
         DialogAction::Continue
@@ -140,7 +157,9 @@ impl NewSessionDialog {
 
     fn try_create(&self) -> DialogAction {
         let Some(path) = self.resolved_path() else { return DialogAction::Continue };
-        let (_, cmd) = TOOL_OPTIONS[self.tool_index];
+        let Some(&(_, cmd)) = self.tool_options.get(self.tool_index) else {
+            return DialogAction::Continue;
+        };
         DialogAction::Create(Session::new(String::new(), path, Tool::from_command(cmd)))
     }
 
@@ -224,7 +243,9 @@ pub fn render_new_session_dialog(frame: &mut Frame, dialog: &NewSessionDialog, a
 
 fn render_tool_field(frame: &mut Frame, dialog: &NewSessionDialog, area: Rect, theme: &Theme) {
     let focused = dialog.focus == DialogField::Tool;
-    let (name, cmd) = TOOL_OPTIONS[dialog.tool_index];
+    let (name, cmd) = dialog.tool_options.get(dialog.tool_index)
+        .copied()
+        .unwrap_or(("Shell", "shell"));
     let arrow_fg = if focused { theme.accent } else { theme.text_dim };
 
     let content = Line::from(vec![
@@ -324,6 +345,7 @@ mod tests {
             ],
             dir_selected: 0,
             dir_confirmed: false,
+            tool_options: ALL_TOOL_OPTIONS.to_vec(),
         }
     }
 
@@ -357,7 +379,7 @@ mod tests {
         let mut dialog = make_dialog();
         assert_eq!(dialog.tool_index, 0);
         // Move right through all tools
-        for _ in 0..TOOL_OPTIONS.len() {
+        for _ in 0..dialog.tool_options.len() {
             dialog.handle_key(key(KeyCode::Right));
         }
         // Should wrap back to 0
@@ -369,7 +391,7 @@ mod tests {
         let mut dialog = make_dialog();
         assert_eq!(dialog.tool_index, 0);
         dialog.handle_key(key(KeyCode::Left));
-        assert_eq!(dialog.tool_index, TOOL_OPTIONS.len() - 1);
+        assert_eq!(dialog.tool_index, dialog.tool_options.len() - 1);
     }
 
     #[test]

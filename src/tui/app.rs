@@ -22,7 +22,6 @@ use crate::tmux::detector::{self, DetectionContext, HookStatus};
 use crate::tui::views::dashboard;
 use crate::tui::views::dashboard::InlineNewRenderState;
 use crate::tui::views::new_session::{self, DialogAction, NewSessionDialog};
-use crate::tui::views::search;
 use crate::tui::zoxide::{self, ZoxideEntry};
 
 // ---------------------------------------------------------------------------
@@ -154,6 +153,8 @@ pub struct App {
     summary_handles: HashMap<String, JoinHandle<(String, Option<String>)>>,
     /// User config loaded from ~/.agentick/config.toml.
     config: crate::config::Config,
+    /// Quick-create keys filtered to only tools available in PATH.
+    quick_create_keys: Vec<(char, &'static str, &'static str)>,
 }
 
 impl App {
@@ -166,6 +167,7 @@ impl App {
         // Ensure hook handler script and Claude Code hook config are installed.
         crate::hooks::setup::ensure_hooks_installed();
         let config = crate::config::Config::load();
+        let quick_create_keys = dashboard::available_quick_create_keys();
         let mut app = Self {
             store,
             selected: 0,
@@ -199,6 +201,7 @@ impl App {
             collapsed_dirs: HashSet::new(),
             summary_handles: HashMap::new(),
             config,
+            quick_create_keys,
         };
         app.spawn_summary_threads();
         // Run the first tick immediately so statuses are detected before the
@@ -267,6 +270,14 @@ impl App {
             _ => None,
         };
 
+        // Extract search state for the dashboard to render inline.
+        let search_state: Option<(&str, usize)> = match &self.mode {
+            AppMode::Search { query, filtered_indices, .. } => {
+                Some((query.as_str(), filtered_indices.len()))
+            }
+            _ => None,
+        };
+
         // Always render the dashboard underneath.
         dashboard::render_dashboard(
             frame,
@@ -284,6 +295,7 @@ impl App {
             inline_new.as_ref(),
             &search_matches,
             confirm_delete_id,
+            search_state,
         );
 
         // Render modal overlays on top.
@@ -301,24 +313,17 @@ impl App {
                     area,
                 );
             }
-            AppMode::Search {
-                query,
-                filtered_indices,
-                ..
-            } => {
-                search::render_search_bar(frame, query, filtered_indices.len(), area);
-            }
             AppMode::QuickCreate { project_path } => {
-                dashboard::render_quick_create_sheet(frame, project_path, area);
+                dashboard::render_quick_create_sheet(frame, project_path, area, &self.quick_create_keys);
             }
             AppMode::InlineNew {
                 step: InlineNewStep::ToolPick,
                 project_path: Some(path),
                 ..
             } => {
-                dashboard::render_quick_create_sheet(frame, path, area);
+                dashboard::render_quick_create_sheet(frame, path, area, &self.quick_create_keys);
             }
-            AppMode::Normal | AppMode::Rename { .. } | AppMode::InlineNew { .. } => {}
+            AppMode::Normal | AppMode::Rename { .. } | AppMode::InlineNew { .. } | AppMode::Search { .. } => {}
         }
     }
 
@@ -1085,8 +1090,8 @@ impl App {
             }
         };
 
-        // Look up the pressed char in QUICK_CREATE_KEYS
-        let entry = dashboard::QUICK_CREATE_KEYS
+        // Look up the pressed char in available quick-create keys
+        let entry = self.quick_create_keys
             .iter()
             .find(|(k, _, _)| *k == ch);
 
@@ -1098,6 +1103,7 @@ impl App {
                 return;
             }
         };
+        let cmd = *cmd;
 
         // Extract project_path before overwriting mode
         let project_path = match &self.mode {
@@ -1331,7 +1337,7 @@ impl App {
                 self.mode = AppMode::NewSession(Box::new(NewSessionDialog::new()));
             }
             KeyCode::Char(ch) => {
-                let entry = dashboard::QUICK_CREATE_KEYS
+                let entry = self.quick_create_keys
                     .iter()
                     .find(|(k, _, _)| *k == ch);
 
@@ -1343,6 +1349,7 @@ impl App {
                         return;
                     }
                 };
+                let cmd = *cmd;
 
                 let path = match project_path {
                     Some(p) => p,
