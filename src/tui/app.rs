@@ -154,7 +154,7 @@ pub struct App {
     /// User config loaded from ~/.agentick/config.toml.
     config: crate::config::Config,
     /// Quick-create keys filtered to only tools available in PATH.
-    quick_create_keys: Vec<(char, &'static str, &'static str)>,
+    quick_create_keys: Vec<(char, String, String)>,
 }
 
 impl App {
@@ -167,7 +167,8 @@ impl App {
         // Ensure hook handler script and Claude Code hook config are installed.
         crate::hooks::setup::ensure_hooks_installed();
         let config = crate::config::Config::load();
-        let quick_create_keys = dashboard::available_quick_create_keys();
+        tmux::set_tmux_path(config.tmux_path());
+        let quick_create_keys = dashboard::available_quick_create_keys(config.quick_create_keys.as_ref());
         let mut app = Self {
             store,
             selected: 0,
@@ -296,6 +297,8 @@ impl App {
             &search_matches,
             confirm_delete_id,
             search_state,
+            self.config.show_token_usage(),
+            self.config.preview_lines(),
         );
 
         // Render modal overlays on top.
@@ -534,13 +537,12 @@ impl App {
 
         // --- Refresh hook statuses every 5 ticks (~2.5s) ---
         if self.tick_count % 5 == 0 {
-            self.hook_status_cache = crate::hooks::read_hook_statuses()
+            self.hook_status_cache = crate::hooks::read_hook_statuses(Some(self.config.hook_freshness_secs()))
                 .into_iter()
                 .map(|(k, v)| {
                     let hook = match v {
                         crate::tmux::detector::HookStatus::Active => HookStatus::Active,
-                        crate::tmux::detector::HookStatus::Waiting => HookStatus::Waiting,
-                        crate::tmux::detector::HookStatus::Done => HookStatus::Done,
+                        crate::tmux::detector::HookStatus::Idle => HookStatus::Idle,
                     };
                     (k, hook)
                 })
@@ -644,6 +646,7 @@ impl App {
                 spinner_last_seen: self.spinner_last_seen.get(tmux_name).copied(),
                 sustained_activity_count: self.sustained_activity_count.get(tmux_name).copied().unwrap_or(0),
                 now,
+                idle_timeout_secs: self.config.idle_timeout_secs(),
             };
 
             let result = detector::detect_status(&ctx);
@@ -1103,7 +1106,7 @@ impl App {
                 return;
             }
         };
-        let cmd = *cmd;
+        let cmd = cmd.clone();
 
         // Extract project_path before overwriting mode
         let project_path = match &self.mode {
@@ -1112,7 +1115,7 @@ impl App {
         };
 
         self.mode = AppMode::Normal;
-        self.create_session_and_select(project_path, cmd);
+        self.create_session_and_select(project_path, &cmd);
     }
 
     // --- Inline rename ------------------------------------------------------
@@ -1349,7 +1352,7 @@ impl App {
                         return;
                     }
                 };
-                let cmd = *cmd;
+                let cmd = cmd.clone();
 
                 let path = match project_path {
                     Some(p) => p,
@@ -1360,7 +1363,7 @@ impl App {
                 };
 
                 self.mode = AppMode::Normal;
-                self.create_session_and_select(path, cmd);
+                self.create_session_and_select(path, &cmd);
             }
             _ => {
                 self.mode = AppMode::Normal;
@@ -1733,8 +1736,8 @@ pub fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             Duration::from_millis(250)
         };
 
-        // Tick-based status refresh: ~500ms.
-        if app.last_tick.elapsed() >= Duration::from_millis(500) {
+        // Tick-based status refresh.
+        if app.last_tick.elapsed() >= Duration::from_millis(app.config.refresh_rate_ms()) {
             app.tick();
             app.last_tick = Instant::now();
         }

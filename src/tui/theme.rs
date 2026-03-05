@@ -47,8 +47,6 @@ pub fn status_color(status: &str) -> Color {
     let t = dark_theme();
     match status {
         "active" => t.green,
-        "waiting" => t.yellow,
-        "done" => t.green,
         "idle" => t.text_dim,
         "dead" => t.red,
         _ => t.text_dim,
@@ -97,18 +95,6 @@ mod tests {
     fn status_color_active() {
         let t = dark_theme();
         assert_eq!(status_color("active"), t.green);
-    }
-
-    #[test]
-    fn status_color_waiting() {
-        let t = dark_theme();
-        assert_eq!(status_color("waiting"), t.yellow);
-    }
-
-    #[test]
-    fn status_color_done() {
-        let t = dark_theme();
-        assert_eq!(status_color("done"), t.green);
     }
 
     #[test]

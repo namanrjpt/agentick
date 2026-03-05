@@ -3,6 +3,13 @@ name = "agentick"
 version = "0.1.0"
 edition = "2024"
 description = "Beautiful TUI session manager for AI coding agents"
+license = "MIT"
+repository = "https://github.com/namanrjpt/agentick"
+homepage = "https://github.com/namanrjpt/agentick"
+authors = ["Naman Rajput"]
+keywords = ["tui", "terminal", "ai", "tmux", "session-manager"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 ratatui = "0.29"

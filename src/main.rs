@@ -23,8 +23,8 @@ enum Commands {
     Add {
         /// Project directory path
         path: String,
-        /// Tool to use (claude, gemini, codex, opencode, cursor, aider, shell)
-        #[arg(short, long, default_value = "claude")]
+        /// Tool to use (claude, gemini, codex, opencode, cursor, aider, vibe, shell)
+        #[arg(short, long)]
         tool: String,
     },
 }
@@ -100,15 +100,9 @@ mod tests {
     }
 
     #[test]
-    fn cli_add_with_defaults() {
-        let cli = Cli::try_parse_from(["agentick", "add", "/tmp/project"]).unwrap();
-        match cli.command {
-            Some(Commands::Add { path, tool }) => {
-                assert_eq!(path, "/tmp/project");
-                assert_eq!(tool, "claude"); // default
-            }
-            _ => panic!("expected Add command"),
-        }
+    fn cli_add_requires_tool_flag() {
+        // --tool is required; omitting it should error.
+        assert!(Cli::try_parse_from(["agentick", "add", "/tmp/project"]).is_err());
     }
 
     #[test]

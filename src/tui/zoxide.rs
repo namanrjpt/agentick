@@ -84,21 +84,21 @@ mod tests {
     use super::*;
 
     const SAMPLE_OUTPUT: &str = "\
-  42.5 /Users/naman/Documents/work-brain
-  38.2 /Users/naman/Documents/agentick
-  12.1 /Users/naman/projects/foo
-   4.0 /home/user/bar
+  42.5 /home/alice/projects/myapp
+  38.2 /home/alice/projects/agentick
+  12.1 /home/alice/work/foo
+   4.0 /home/bob/bar
 ";
 
     #[test]
     fn parse_zoxide_output_basic() {
         let entries = parse_zoxide_output(SAMPLE_OUTPUT);
         assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].path, "/Users/naman/Documents/work-brain");
+        assert_eq!(entries[0].path, "/home/alice/projects/myapp");
         assert!((entries[0].score - 42.5).abs() < f64::EPSILON);
-        assert_eq!(entries[1].path, "/Users/naman/Documents/agentick");
+        assert_eq!(entries[1].path, "/home/alice/projects/agentick");
         assert!((entries[1].score - 38.2).abs() < f64::EPSILON);
-        assert_eq!(entries[3].path, "/home/user/bar");
+        assert_eq!(entries[3].path, "/home/bob/bar");
         assert!((entries[3].score - 4.0).abs() < f64::EPSILON);
     }
 
@@ -122,7 +122,7 @@ mod tests {
         let results = fuzzy_filter(&entries, "", 10);
         assert_eq!(results.len(), 4);
         // Should preserve original (frecency) order
-        assert_eq!(results[0].path, "/Users/naman/Documents/work-brain");
+        assert_eq!(results[0].path, "/home/alice/projects/myapp");
     }
 
     #[test]
@@ -137,7 +137,7 @@ mod tests {
         let entries = parse_zoxide_output(SAMPLE_OUTPUT);
         let results = fuzzy_filter(&entries, "agentick", 10);
         assert!(!results.is_empty());
-        assert_eq!(results[0].path, "/Users/naman/Documents/agentick");
+        assert_eq!(results[0].path, "/home/alice/projects/agentick");
     }
 
     #[test]
@@ -150,16 +150,16 @@ mod tests {
     #[test]
     fn fuzzy_filter_respects_max_results() {
         let entries = parse_zoxide_output(SAMPLE_OUTPUT);
-        let results = fuzzy_filter(&entries, "naman", 1);
+        let results = fuzzy_filter(&entries, "alice", 1);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn fuzzy_filter_ranks_best_match_first() {
         let entries = parse_zoxide_output(SAMPLE_OUTPUT);
-        // "work" should match work-brain best
+        // "work" should match the path containing "work" best
         let results = fuzzy_filter(&entries, "work", 10);
         assert!(!results.is_empty());
-        assert_eq!(results[0].path, "/Users/naman/Documents/work-brain");
+        assert_eq!(results[0].path, "/home/alice/work/foo");
     }
 }

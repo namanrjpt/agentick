@@ -29,7 +29,7 @@ impl TmuxControlClient {
     /// stdin/stdout and starts a reader thread that parses the control
     /// mode protocol.
     pub fn attach(session_name: &str) -> Result<Self> {
-        let mut child = Command::new("tmux")
+        let mut child = Command::new(super::client::tmux_bin())
             .args(["-C", "attach-session", "-t", session_name])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

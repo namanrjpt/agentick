@@ -32,7 +32,8 @@ pub struct InlineNewRenderState<'a> {
 // ---------------------------------------------------------------------------
 
 /// All known quick-create keys: (key, display_label, command_name).
-const ALL_QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
+/// Default quick-create key bindings: (key, display_label, command_name).
+const DEFAULT_QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
     ('c', "Claude", "claude"),
     ('x', "Codex", "codex"),
     ('g', "Gemini", "gemini"),
@@ -43,13 +44,51 @@ const ALL_QUICK_CREATE_KEYS: &[(char, &str, &str)] = &[
     ('o', "OpenCode", "opencode"),
 ];
 
-/// Return only quick-create keys whose CLI binary is available in PATH.
-pub fn available_quick_create_keys() -> Vec<(char, &'static str, &'static str)> {
-    ALL_QUICK_CREATE_KEYS
+/// Return quick-create keys (filtered to available tools), applying user
+/// overrides from config.  User overrides replace the default key for a
+/// tool command, e.g. `{ m = "claude" }` binds `m` to Claude instead of `c`.
+pub fn available_quick_create_keys(
+    overrides: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<(char, String, String)> {
+    // Build a map from command → (key, label) using defaults, then apply overrides.
+    // Start with defaults.
+    let mut entries: Vec<(char, String, String)> = DEFAULT_QUICK_CREATE_KEYS
         .iter()
+        .map(|(k, label, cmd)| (*k, label.to_string(), cmd.to_string()))
+        .collect();
+
+    if let Some(map) = overrides {
+        // For each user override key→command, update the matching entry's key
+        // (or add a new entry if the command isn't in defaults).
+        for (key_str, cmd) in map {
+            let ch = match key_str.chars().next() {
+                Some(c) if key_str.len() == 1 => c,
+                _ => continue, // skip invalid keys
+            };
+            let cmd_lower = cmd.to_lowercase();
+            if let Some(entry) = entries.iter_mut().find(|(_, _, c)| c == &cmd_lower) {
+                entry.0 = ch;
+            } else {
+                // New tool not in defaults — derive label from command.
+                let label = capitalize_first(&cmd_lower);
+                entries.push((ch, label, cmd_lower));
+            }
+        }
+    }
+
+    entries
+        .into_iter()
         .filter(|(_, _, cmd)| Tool::from_command(cmd).is_available())
-        .copied()
         .collect()
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +139,8 @@ pub fn render_dashboard(
     search_matches: &HashSet<usize>,
     confirm_delete_id: Option<&str>,
     search_state: Option<(&str, usize)>, // (query, result_count) when search is active
+    show_token_usage: bool,
+    preview_lines: usize,
 ) {
     let theme = dark_theme();
 
@@ -160,10 +201,10 @@ pub fn render_dashboard(
             search::render_search_bar(frame, query, count, bar_area);
         }
 
-        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id);
+        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id, show_token_usage);
         render_preview_pane(
             frame, sessions, collapsed_dirs, selected, status_filter, preview_content,
-            scroll_cache, preview_scroll, focus, h_chunks[1], &theme,
+            scroll_cache, preview_scroll, focus, h_chunks[1], &theme, preview_lines,
         );
     } else {
         // Narrow layout: search bar above the full-width session list.
@@ -181,7 +222,7 @@ pub fn render_dashboard(
             search::render_search_bar(frame, query, count, bar_area);
         }
 
-        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id);
+        render_session_list(frame, &items, selected, tick_count, list_area, &theme, rename_state, inline_new, search_matches, confirm_delete_id, show_token_usage);
     }
 
     // --- Bottom help bar --------------------------------------------------
@@ -204,14 +245,6 @@ fn render_top_bar(
         .iter()
         .filter(|s| s.status == Status::Active)
         .count();
-    let waiting = sessions
-        .iter()
-        .filter(|s| s.status == Status::Waiting)
-        .count();
-    let done = sessions
-        .iter()
-        .filter(|s| s.status == Status::Done)
-        .count();
     let idle = sessions
         .iter()
         .filter(|s| s.status == Status::Idle)
@@ -230,16 +263,6 @@ fn render_top_bar(
         Span::raw("  "),
         Span::styled(
             format!("\u{25CF} {} active", active),
-            Style::default().fg(theme.green),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("\u{25C9} {} waiting", waiting),
-            Style::default().fg(theme.yellow),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("\u{25CF} {} done", done),
             Style::default().fg(theme.green),
         ),
         Span::raw("  "),
@@ -429,6 +452,7 @@ fn render_session_list(
     inline_new: Option<&InlineNewRenderState<'_>>,
     search_matches: &HashSet<usize>,
     confirm_delete_id: Option<&str>,
+    show_token_usage: bool,
 ) {
     let list_items: Vec<ListItem> = items
         .iter()
@@ -524,7 +548,7 @@ fn render_session_list(
                 };
                 let delete_label = "Delete (Y/esc)?";
                 let bar_w: usize = 4;
-                let has_bar = session.context_percentage().is_some();
+                let has_bar = show_token_usage && session.context_percentage().is_some();
                 let bar_reserved = if is_deleting {
                     1 + delete_label.len()
                 } else if has_bar {
@@ -615,36 +639,38 @@ fn render_session_list(
                         delete_label,
                         delete_style.add_modifier(Modifier::BOLD),
                     ));
-                } else if let Some(pct) = session.context_percentage() {
-                    // Context bar: 4 chars, filled count + color by bucket
-                    //   <25% → 1 green  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
-                    let (filled, color) = if pct >= 75.0 {
-                        (4, theme.red)
-                    } else if pct >= 50.0 {
-                        (3, theme.yellow)
-                    } else if pct >= 25.0 {
-                        (2, theme.green)
-                    } else {
-                        (1, theme.green)
-                    };
-                    let empty = bar_w - filled;
+                } else if show_token_usage {
+                    if let Some(pct) = session.context_percentage() {
+                        // Context bar: 4 chars, filled count + color by bucket
+                        //   <25% → 1 green  |  25-50% → 2 green  |  50-75% → 3 yellow  |  ≥75% → 4 red
+                        let (filled, color) = if pct >= 75.0 {
+                            (4, theme.red)
+                        } else if pct >= 50.0 {
+                            (3, theme.yellow)
+                        } else if pct >= 25.0 {
+                            (2, theme.green)
+                        } else {
+                            (1, theme.green)
+                        };
+                        let empty = bar_w - filled;
 
-                    // Right-align the bar
-                    let used_w = prefix_w + title_display.len();
-                    let bar_col = (area.width as usize).saturating_sub(bar_w + 1);
-                    let gap = bar_col.saturating_sub(used_w);
-                    if gap > 0 {
-                        spans.push(Span::raw(" ".repeat(gap)));
-                    }
-                    spans.push(Span::styled(
-                        "\u{2501}".repeat(filled),
-                        Style::default().fg(color),
-                    ));
-                    if empty > 0 {
+                        // Right-align the bar
+                        let used_w = prefix_w + title_display.len();
+                        let bar_col = (area.width as usize).saturating_sub(bar_w + 1);
+                        let gap = bar_col.saturating_sub(used_w);
+                        if gap > 0 {
+                            spans.push(Span::raw(" ".repeat(gap)));
+                        }
                         spans.push(Span::styled(
-                            "\u{2501}".repeat(empty),
-                            Style::default().fg(theme.text_dim).add_modifier(Modifier::DIM),
+                            "\u{2501}".repeat(filled),
+                            Style::default().fg(color),
                         ));
+                        if empty > 0 {
+                            spans.push(Span::styled(
+                                "\u{2501}".repeat(empty),
+                                Style::default().fg(theme.text_dim).add_modifier(Modifier::DIM),
+                            ));
+                        }
                     }
                 }
 
@@ -800,6 +826,7 @@ fn render_preview_pane(
     focus: FocusPane,
     area: Rect,
     theme: &Theme,
+    preview_lines_limit: usize,
 ) {
     let selected_session = find_selected_session(sessions, collapsed_dirs, selected, status_filter);
     let is_focused = focus == FocusPane::Right;
@@ -841,7 +868,8 @@ fn render_preview_pane(
                 .style(Style::default().bg(theme.bg));
 
             let all_lines = &styled_text.lines;
-            let max_lines = area.height.saturating_sub(2) as usize;
+            let pane_lines = area.height.saturating_sub(2) as usize;
+            let max_lines = if preview_lines_limit > 0 { pane_lines.min(preview_lines_limit) } else { pane_lines };
             // Clamp: never scroll past the top of history.
             let clamped_scroll = preview_scroll.min(all_lines.len().saturating_sub(max_lines));
             let end = all_lines.len().saturating_sub(clamped_scroll);
@@ -869,7 +897,8 @@ fn render_preview_pane(
                 .style(Style::default().bg(theme.bg));
 
             // Show bottom of content (most recent output), clipped to area.
-            let max_lines = area.height.saturating_sub(2) as usize;
+            let pane_lines = area.height.saturating_sub(2) as usize;
+            let max_lines = if preview_lines_limit > 0 { pane_lines.min(preview_lines_limit) } else { pane_lines };
             let all_lines = &content.lines;
             let start = all_lines.len().saturating_sub(max_lines);
             let visible_lines = all_lines[start..].to_vec();
@@ -967,7 +996,7 @@ pub fn render_quick_create_sheet(
     frame: &mut Frame,
     project_path: &Path,
     area: Rect,
-    quick_keys: &[(char, &str, &str)],
+    quick_keys: &[(char, String, String)],
 ) {
     let theme = dark_theme();
 
@@ -1012,7 +1041,7 @@ pub fn render_quick_create_sheet(
         ));
         line2_spans.push(Span::styled(
             format!(" {} ", label),
-            Style::default().fg(tool_color(cmd)),
+            Style::default().fg(tool_color(cmd.as_str())),
         ));
         line2_spans.push(Span::styled(" ", Style::default().fg(theme.text_dim)));
     }
@@ -1371,5 +1400,45 @@ mod tests {
         let sessions: Vec<Session> = vec![];
         let collapsed = HashSet::new();
         assert_eq!(display_item_count(&sessions, &collapsed, None), 0);
+    }
+
+    #[test]
+    fn quick_create_keys_no_overrides_returns_defaults() {
+        // Without filtering by is_available, check the raw merge logic.
+        // We test via available_quick_create_keys which filters, so just
+        // verify it doesn't panic and returns some subset of defaults.
+        let keys = available_quick_create_keys(None);
+        // All returned entries have single-char keys.
+        assert!(keys.iter().all(|(ch, _, _)| ch.is_ascii()));
+    }
+
+    #[test]
+    fn quick_create_keys_override_rebinds_key() {
+        // Override claude from 'c' to 'm'.
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("m".to_string(), "claude".to_string());
+        let keys = available_quick_create_keys(Some(&overrides));
+        // If claude is available, it should be bound to 'm'.
+        if let Some(entry) = keys.iter().find(|(_, _, cmd)| cmd == "claude") {
+            assert_eq!(entry.0, 'm');
+        }
+    }
+
+    #[test]
+    fn quick_create_keys_invalid_key_ignored() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("long".to_string(), "claude".to_string()); // invalid: not single char
+        let keys = available_quick_create_keys(Some(&overrides));
+        // Claude should keep default 'c' key since "long" is not a single char.
+        if let Some(entry) = keys.iter().find(|(_, _, cmd)| cmd == "claude") {
+            assert_eq!(entry.0, 'c');
+        }
+    }
+
+    #[test]
+    fn capitalize_first_works() {
+        assert_eq!(super::capitalize_first("claude"), "Claude");
+        assert_eq!(super::capitalize_first(""), "");
+        assert_eq!(super::capitalize_first("a"), "A");
     }
 }

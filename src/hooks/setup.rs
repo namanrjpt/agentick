@@ -4,11 +4,15 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 
-/// Ensure the agentick hook handler script and Claude Code hook configuration
-/// are installed. Idempotent — safe to call on every startup.
+/// Ensure the agentick hook handler script is installed, and if Claude Code
+/// is present, inject hook configuration into its settings.
+/// Idempotent — safe to call on every startup.
 pub fn ensure_hooks_installed() {
     let _ = install_handler_script();
-    let _ = inject_claude_hooks();
+    // Only inject Claude hooks if the Claude CLI is actually installed.
+    if crate::session::instance::Tool::Claude.is_available() {
+        let _ = inject_claude_hooks();
+    }
 }
 
 // ---------------------------------------------------------------------------

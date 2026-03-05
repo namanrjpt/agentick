@@ -13,14 +13,15 @@ struct HookFile {
     status: String,
 }
 
-/// Maximum age (in seconds) for a hook file to be considered fresh.
-const HOOK_FRESHNESS_SECS: u64 = 120;
+/// Default maximum age (in seconds) for a hook file to be considered fresh.
+const DEFAULT_HOOK_FRESHNESS_SECS: u64 = 120;
 
 /// Read all fresh hook status files from `~/.agentick/hooks/`.
 ///
 /// Returns a map of `filename_stem -> HookStatus`.
-/// Stale files (older than 2 minutes) are ignored.
-pub fn read_hook_statuses() -> HashMap<String, HookStatus> {
+/// Stale files (older than `freshness_secs`) are ignored.
+pub fn read_hook_statuses(freshness_secs: Option<u64>) -> HashMap<String, HookStatus> {
+    let freshness = freshness_secs.unwrap_or(DEFAULT_HOOK_FRESHNESS_SECS);
     let hooks_dir = Config::data_dir().join("hooks");
     let mut map = HashMap::new();
 
@@ -44,7 +45,7 @@ pub fn read_hook_statuses() -> HashMap<String, HookStatus> {
         };
 
         let age = now.duration_since(mtime).unwrap_or_default();
-        if age.as_secs() > HOOK_FRESHNESS_SECS {
+        if age.as_secs() > freshness {
             continue;
         }
 
@@ -60,9 +61,8 @@ pub fn read_hook_statuses() -> HashMap<String, HookStatus> {
         };
 
         let status = match hook_file.status.as_str() {
-            "active" | "working" => HookStatus::Active,
-            "waiting" | "waiting_for_permission" => HookStatus::Waiting,
-            "done" | "idle" | "stopped" => HookStatus::Done,
+            "active" | "working" | "waiting" | "waiting_for_permission" => HookStatus::Active,
+            "done" | "idle" | "stopped" => HookStatus::Idle,
             _ => continue,
         };
 
@@ -78,9 +78,8 @@ pub fn read_hook_statuses() -> HashMap<String, HookStatus> {
 /// Internal: parse a hook status string to HookStatus (for testing).
 fn parse_hook_status(s: &str) -> Option<HookStatus> {
     match s {
-        "active" | "working" => Some(HookStatus::Active),
-        "waiting" | "waiting_for_permission" => Some(HookStatus::Waiting),
-        "done" | "idle" | "stopped" => Some(HookStatus::Done),
+        "active" | "working" | "waiting" | "waiting_for_permission" => Some(HookStatus::Active),
+        "done" | "idle" | "stopped" => Some(HookStatus::Idle),
         _ => None,
     }
 }
@@ -94,19 +93,15 @@ mod tests {
     fn parse_hook_status_maps_active() {
         assert_eq!(parse_hook_status("active"), Some(HookStatus::Active));
         assert_eq!(parse_hook_status("working"), Some(HookStatus::Active));
+        assert_eq!(parse_hook_status("waiting"), Some(HookStatus::Active));
+        assert_eq!(parse_hook_status("waiting_for_permission"), Some(HookStatus::Active));
     }
 
     #[test]
-    fn parse_hook_status_maps_waiting() {
-        assert_eq!(parse_hook_status("waiting"), Some(HookStatus::Waiting));
-        assert_eq!(parse_hook_status("waiting_for_permission"), Some(HookStatus::Waiting));
-    }
-
-    #[test]
-    fn parse_hook_status_maps_done() {
-        assert_eq!(parse_hook_status("done"), Some(HookStatus::Done));
-        assert_eq!(parse_hook_status("idle"), Some(HookStatus::Done));
-        assert_eq!(parse_hook_status("stopped"), Some(HookStatus::Done));
+    fn parse_hook_status_maps_idle() {
+        assert_eq!(parse_hook_status("done"), Some(HookStatus::Idle));
+        assert_eq!(parse_hook_status("idle"), Some(HookStatus::Idle));
+        assert_eq!(parse_hook_status("stopped"), Some(HookStatus::Idle));
     }
 
     #[test]
@@ -158,7 +153,7 @@ mod tests {
 
     #[test]
     fn stale_hook_freshness_constant() {
-        // Verify the freshness window is 2 minutes.
-        assert_eq!(HOOK_FRESHNESS_SECS, 120);
+        // Verify the default freshness window is 2 minutes.
+        assert_eq!(DEFAULT_HOOK_FRESHNESS_SECS, 120);
     }
 }

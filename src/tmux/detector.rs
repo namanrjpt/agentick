@@ -45,14 +45,15 @@ pub struct DetectionContext<'a> {
     pub spinner_last_seen: Option<Instant>,
     pub sustained_activity_count: u32,
     pub now: Instant,
+    /// Seconds of inactivity before done→idle (default: 60).
+    pub idle_timeout_secs: u64,
 }
 
 /// Status reported by a Claude hook file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
     Active,
-    Waiting,
-    Done,
+    Idle,
 }
 
 /// Result of the detection pipeline.
@@ -77,8 +78,7 @@ pub fn detect_status(ctx: &DetectionContext) -> DetectionResult {
         return DetectionResult {
             status: match hook {
                 HookStatus::Active => Status::Active,
-                HookStatus::Waiting => Status::Waiting,
-                HookStatus::Done => Status::Done,
+                HookStatus::Idle => Status::Idle,
             },
             spinner_seen: false,
         };
@@ -120,7 +120,7 @@ pub fn detect_status(ctx: &DetectionContext) -> DetectionResult {
         // Layer 4: Prompt detection (only after ruling out busy).
         if has_prompt_indicator(ctx.tool, &last_lines) {
             return DetectionResult {
-                status: Status::Waiting,
+                status: Status::Active,
                 spinner_seen: false,
             };
         }
@@ -144,9 +144,9 @@ pub fn detect_status(ctx: &DetectionContext) -> DetectionResult {
             };
         }
 
-        if elapsed < Duration::from_secs(60) {
+        if elapsed < Duration::from_secs(ctx.idle_timeout_secs) {
             return DetectionResult {
-                status: Status::Done,
+                status: Status::Active,
                 spinner_seen: false,
             };
         }
@@ -416,6 +416,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Idle);
@@ -432,6 +433,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -448,6 +450,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -465,9 +468,10 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Waiting);
+        assert_eq!(result.status, Status::Active);
     }
 
     #[test]
@@ -482,6 +486,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -494,14 +499,15 @@ mod tests {
             tool: &Tool::Claude,
             pane_title: Some("\u{280B} Session"),
             pane_content: None,
-            hook_status: Some(HookStatus::Waiting),
+            hook_status: Some(HookStatus::Active),
             activity_changed_at: Some(Instant::now()),
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Waiting);
+        assert_eq!(result.status, Status::Active);
     }
 
     // -- Vibe detection -----------------------------------------------------
@@ -518,9 +524,10 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 10, // high sustained count from cursor blink
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Waiting);
+        assert_eq!(result.status, Status::Active);
     }
 
     #[test]
@@ -535,6 +542,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 5,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -552,9 +560,10 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 5,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Waiting);
+        assert_eq!(result.status, Status::Active);
     }
 
     #[test]
@@ -570,9 +579,10 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 20,
             now: Instant::now(),
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.status, Status::Active);
     }
 
     // -- Priority 2: Edge cases -----------------------------------------------
@@ -590,6 +600,7 @@ mod tests {
             spinner_last_seen: Some(now - Duration::from_secs(2)),
             sustained_activity_count: 0,
             now,
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -608,9 +619,10 @@ mod tests {
             spinner_last_seen: Some(now - Duration::from_secs(10)),
             sustained_activity_count: 0,
             now,
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Waiting);
+        assert_eq!(result.status, Status::Active);
     }
 
     #[test]
@@ -626,6 +638,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 0,
             now,
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Idle);
@@ -676,6 +689,7 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 5,
             now,
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
         assert_eq!(result.status, Status::Active);
@@ -695,8 +709,9 @@ mod tests {
             spinner_last_seen: None,
             sustained_activity_count: 20,
             now,
+            idle_timeout_secs: 60,
         };
         let result = detect_status(&ctx);
-        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.status, Status::Active);
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Context, eyre};
@@ -9,12 +10,25 @@ use color_eyre::Result;
 /// Default timeout for tmux subprocess calls on the hot path (tick / event loop).
 const TMUX_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Custom tmux binary path, set once at startup.
+static TMUX_BIN: OnceLock<String> = OnceLock::new();
+
+/// Set the tmux binary path (call once at startup). Defaults to "tmux".
+pub fn set_tmux_path(path: &str) {
+    let _ = TMUX_BIN.set(path.to_string());
+}
+
+/// Get the configured tmux binary path.
+pub fn tmux_bin() -> &'static str {
+    TMUX_BIN.get().map(|s| s.as_str()).unwrap_or("tmux")
+}
+
 /// Spawn a tmux command and wait for its output with a timeout.
 ///
 /// If the subprocess doesn't finish within `timeout`, it is killed and an
 /// error is returned.  This prevents a hung tmux from freezing the UI.
 fn tmux_output_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
-    let mut child = Command::new("tmux")
+    let mut child = Command::new(tmux_bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -60,7 +74,7 @@ pub struct TmuxSessionInfo {
 
 /// Returns `true` when `tmux` is found on `$PATH` and responds to `--version`.
 pub fn tmux_available() -> bool {
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .arg("-V")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -79,31 +93,31 @@ pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
     // Set global history-limit BEFORE creating the session. tmux applies
     // history-limit at pane creation time, so setting it after new-session
     // has no effect on the pane that was already created.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-g", "history-limit", "50000"])
         .output();
 
     // Enable extended-keys so tmux passes modifier information (e.g.
     // Shift+Enter) through to the application running inside the pane.
     // Without this, Shift+Enter is indistinguishable from plain Enter.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-s", "extended-keys", "always"])
         .output();
 
     // Use CSI u encoding (e.g. \x1b[13;2u for Shift+Enter) instead of the
     // default xterm format (\x1b[27;2;13~) which Claude CLI doesn't understand.
     // Requires tmux 3.5+; silently ignored on older versions.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-s", "extended-keys-format", "csi-u"])
         .output();
 
     // Tell tmux the outer terminal supports extended keys so it decodes
     // modifier information from the terminal emulator.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
         .output();
 
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args(["new-session", "-d", "-s", name, "-c"])
         .arg(dir)
         .arg(cmd)
@@ -116,21 +130,21 @@ pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
     }
 
     // Hide the tmux status bar — agentick provides its own UI chrome.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-t", name, "status", "off"])
         .output();
 
     // Enable mouse mode so that scroll events in the attached session go to
     // tmux (scrolling through pane history) rather than the outer terminal
     // (which would show stale "previous terminal" content).
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-t", name, "mouse", "on"])
         .output();
 
 
     // Clear any shell init / .zshrc output that accumulated before the
     // command started, so scrollback only contains actual agent output.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["clear-history", "-t", name])
         .output();
 
@@ -141,7 +155,7 @@ pub fn create_session(name: &str, dir: &Path, cmd: &str) -> Result<()> {
 ///
 /// Equivalent to: `tmux set-option -t <name> <option> <value>`
 pub fn set_option(name: &str, option: &str, value: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args(["set-option", "-t", name, option, value])
         .output()
         .wrap_err("failed to spawn tmux set-option")?;
@@ -158,7 +172,7 @@ pub fn set_option(name: &str, option: &str, value: &str) -> Result<()> {
 ///
 /// Equivalent to: `tmux resize-window -t <name> -x <cols> -y <rows>`
 pub fn resize_window(name: &str, cols: u16, rows: u16) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args([
             "resize-window",
             "-t",
@@ -183,7 +197,7 @@ pub fn resize_window(name: &str, cols: u16, rows: u16) -> Result<()> {
 ///
 /// Equivalent to: `tmux clear-history -t <name>`
 pub fn clear_history(name: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args(["clear-history", "-t", name])
         .output()
         .wrap_err("failed to spawn tmux clear-history")?;
@@ -200,7 +214,7 @@ pub fn clear_history(name: &str) -> Result<()> {
 ///
 /// Equivalent to: `tmux kill-session -t <name>`
 pub fn kill_session(name: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args(["kill-session", "-t", name])
         .output()
         .wrap_err("failed to spawn tmux kill-session")?;
@@ -217,7 +231,7 @@ pub fn kill_session(name: &str) -> Result<()> {
 ///
 /// Equivalent to: `tmux has-session -t <name>`
 pub fn session_exists(name: &str) -> Result<bool> {
-    let status = Command::new("tmux")
+    let status = Command::new(tmux_bin())
         .args(["has-session", "-t", name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -245,7 +259,7 @@ pub fn capture_pane(name: &str) -> Result<String> {
 ///
 /// Equivalent to: `tmux send-keys -t <name> <keys> Enter`
 pub fn send_keys(name: &str, keys: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args(["send-keys", "-t", name, keys, "Enter"])
         .output()
         .wrap_err("failed to spawn tmux send-keys")?;
@@ -297,7 +311,7 @@ pub fn capture_pane_scrollback(name: &str) -> Result<String> {
 ///
 /// Equivalent to: `tmux send-keys -t <name> -l <keys>`
 pub fn send_keys_raw(name: &str, keys: &str) -> Result<()> {
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .args(["send-keys", "-t", name, "-l", keys])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -316,7 +330,7 @@ pub fn send_keys_hex(name: &str, hex: &str) -> Result<()> {
     let mut args = vec!["send-keys", "-t", name, "-H"];
     let pairs: Vec<&str> = hex.split_whitespace().collect();
     args.extend(pairs.iter());
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -331,7 +345,7 @@ pub fn send_keys_hex(name: &str, hex: &str) -> Result<()> {
 ///
 /// Equivalent to: `tmux send-keys -t <name> <key_name>`
 pub fn send_keys_special(name: &str, key_name: &str) -> Result<()> {
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .args(["send-keys", "-t", name, key_name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -348,22 +362,22 @@ pub fn send_keys_special(name: &str, key_name: &str) -> Result<()> {
 /// Ctrl+b d) for a simpler UX.
 pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
     // Bind Ctrl+q to detach in the root key table (no prefix needed).
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["bind-key", "-n", "C-q", "detach-client"])
         .output();
 
     // Ensure extended-keys is on so Shift+Enter etc. work in the session.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-s", "extended-keys", "always"])
         .output();
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-s", "extended-keys-format", "csi-u"])
         .output();
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-as", "terminal-features", "xterm*:extkeys"])
         .output();
 
-    let status = Command::new("tmux")
+    let status = Command::new(tmux_bin())
         .args(["attach-session", "-t", name])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -373,7 +387,7 @@ pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
 
     // Remove the root-table binding after detach so it doesn't leak into
     // the user's normal tmux usage.
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["unbind-key", "-n", "C-q"])
         .output();
 
@@ -385,7 +399,7 @@ pub fn attach_session(name: &str) -> Result<std::process::ExitStatus> {
 /// Equivalent to:
 /// `tmux list-sessions -F "#{session_name}\t#{session_created}\t#{window_activity}"`
 pub fn list_sessions() -> Result<Vec<TmuxSessionInfo>> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args([
             "list-sessions",
             "-F",
@@ -428,7 +442,7 @@ pub fn list_sessions() -> Result<Vec<TmuxSessionInfo>> {
 /// Uses `tmux list-windows` rather than `list-sessions` so we get
 /// per-window activity resolution.
 pub fn get_window_activity(name: &str) -> Result<i64> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args([
             "list-windows",
             "-t",
@@ -469,7 +483,7 @@ pub fn get_window_activity(name: &str) -> Result<i64> {
 /// Equivalent to:
 /// `tmux list-windows -a -F "#{session_name}\t#{window_activity}"`
 pub fn refresh_activity_cache() -> Result<HashMap<String, i64>> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin())
         .args([
             "list-windows",
             "-a",

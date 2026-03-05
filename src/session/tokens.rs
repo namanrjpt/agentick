@@ -68,7 +68,7 @@ pub fn refresh_all(sessions: &mut [Session], cache: &mut TokenCache) {
 /// `~/.claude/projects/<path-slug>/<session-uuid>.jsonl`
 ///
 /// The path-slug is the project path with `/` replaced by `-` and leading `-`.
-/// e.g. `/Users/naman/Documents/work-brain` → `-Users-naman-Documents-work-brain`
+/// e.g. `/home/alice/projects/myapp` → `-home-alice-projects-myapp`
 ///
 /// Each assistant message line contains `message.usage` with token counts
 /// and `message.model` with the model name.
@@ -81,7 +81,7 @@ fn extract_claude(session: &Session, cache: &mut TokenCache) -> TokenData {
 }
 
 /// Convert a project path to Claude's directory slug format.
-/// `/Users/naman/Documents/work-brain` → `-Users-naman-Documents-work-brain`
+/// `/home/alice/projects/myapp` → `-home-alice-projects-myapp`
 fn path_to_claude_slug(path: &Path) -> String {
     let s = path.to_string_lossy();
     s.replace('/', "-")
@@ -373,6 +373,11 @@ pub fn collect_conversation_context(jsonl_path: &Path) -> Option<String> {
 /// Returns `None` on error, timeout, or empty output.
 pub fn generate_llm_summary(context: &str) -> Option<String> {
     use std::process::Command;
+
+    // Only attempt if Claude CLI is installed.
+    if !Tool::Claude.is_available() {
+        return None;
+    }
 
     let prompt = format!(
         "Summarize this coding conversation in exactly 3-4 words as a short title. \
@@ -1233,8 +1238,8 @@ mod tests {
 
     #[test]
     fn path_to_claude_slug_converts_slashes() {
-        let p = PathBuf::from("/Users/naman/Documents/work-brain");
-        assert_eq!(path_to_claude_slug(&p), "-Users-naman-Documents-work-brain");
+        let p = PathBuf::from("/home/alice/projects/myapp");
+        assert_eq!(path_to_claude_slug(&p), "-home-alice-projects-myapp");
     }
 
     #[test]
@@ -1586,9 +1591,9 @@ mod tests {
 
     #[test]
     fn compute_md5_hex_known_value() {
-        // md5("/Users/naman/Documents/work-brain") = "605df61177d4441b5d46bf808d2e8aab"
-        let hash = compute_md5_hex("/Users/naman/Documents/work-brain");
-        assert_eq!(hash, "605df61177d4441b5d46bf808d2e8aab");
+        // md5("/home/alice/projects/myapp") = "6cc1dcbda2292c567803d35fe0236674"
+        let hash = compute_md5_hex("/home/alice/projects/myapp");
+        assert_eq!(hash, "6cc1dcbda2292c567803d35fe0236674");
     }
 
     // -- extract_first_user_message (Claude) ----------------------------------

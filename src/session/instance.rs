@@ -48,7 +48,7 @@ impl Tool {
             "cursor" | "cursor-agent" => Tool::Cursor,
             "aider" => Tool::Aider,
             "vibe" => Tool::Vibe,
-            "bash" | "sh" | "zsh" | "fish" => Tool::Shell,
+            "shell" | "bash" | "sh" | "zsh" | "fish" => Tool::Shell,
             other => Tool::Custom(other.to_string()),
         }
     }
@@ -134,8 +134,6 @@ impl Tool {
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Active,
-    Waiting,
-    Done,
     Idle,
     Dead,
 }
@@ -150,8 +148,6 @@ impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Status::Active => write!(f, "active"),
-            Status::Waiting => write!(f, "waiting"),
-            Status::Done => write!(f, "done"),
             Status::Idle => write!(f, "idle"),
             Status::Dead => write!(f, "dead"),
         }
@@ -163,8 +159,6 @@ impl Status {
     pub fn indicator(&self) -> &str {
         match self {
             Status::Active => "\u{25CF}",  // ● (flashing in renderer)
-            Status::Waiting => "\u{25C9}", // ◉ (ring with dot)
-            Status::Done => "\u{25CF}",    // ● (solid)
             Status::Idle => "\u{25CB}",    // ○
             Status::Dead => "\u{2715}",    // ✕
         }
@@ -339,8 +333,6 @@ mod tests {
     #[test]
     fn status_indicator_returns_expected_glyphs() {
         assert_eq!(Status::Active.indicator(), "\u{25CF}");
-        assert_eq!(Status::Waiting.indicator(), "\u{25C9}");
-        assert_eq!(Status::Done.indicator(), "\u{25CF}");
         assert_eq!(Status::Idle.indicator(), "\u{25CB}");
         assert_eq!(Status::Dead.indicator(), "\u{2715}");
     }
@@ -472,8 +464,6 @@ mod tests {
     #[test]
     fn status_display_all_variants() {
         assert_eq!(Status::Active.to_string(), "active");
-        assert_eq!(Status::Waiting.to_string(), "waiting");
-        assert_eq!(Status::Done.to_string(), "done");
         assert_eq!(Status::Idle.to_string(), "idle");
         assert_eq!(Status::Dead.to_string(), "dead");
     }
