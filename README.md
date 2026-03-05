@@ -2,7 +2,12 @@
 
 A terminal UI session manager for AI coding agents. Manage multiple AI tool sessions in a single tmux-powered dashboard with live previews, status detection, and context window tracking.
 
-![License](https://img.shields.io/github/license/namanrjpt/agentick)
+[![License](https://img.shields.io/github/license/namanrjpt/agentick)](https://github.com/namanrjpt/agentick/blob/main/LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/agentick)](https://crates.io/crates/agentick)
+[![Downloads](https://img.shields.io/crates/d/agentick)](https://crates.io/crates/agentick)
+[![GitHub release](https://img.shields.io/github/v/release/namanrjpt/agentick)](https://github.com/namanrjpt/agentick/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/namanrjpt/agentick/release.yml)](https://github.com/namanrjpt/agentick/actions)
+[![GitHub stars](https://img.shields.io/github/stars/namanrjpt/agentick)](https://github.com/namanrjpt/agentick/stargazers)
 
 ## Features
 

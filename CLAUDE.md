@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Commit rules
+
+- NEVER include `Co-Authored-By` lines mentioning Claude in commit messages.
+- Commits should only attribute the user (Naman Rajput).
+
 ## What is agentick?
 
 A terminal UI (TUI) session manager for AI coding agents. It manages multiple AI tool sessions (Claude, Gemini, Codex, OpenCode, Cursor, Aider, shell) via tmux, showing live previews, status detection, and context window usage in a single dashboard. Requires tmux at runtime.
