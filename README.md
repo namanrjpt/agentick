@@ -11,7 +11,7 @@ A terminal UI session manager for AI coding agents. Manage multiple AI tool sess
 
 ## Demo
 
-<video src="https://github.com/namanrjpt/agentick/raw/main/demo.mp4" width="100%" autoplay loop muted playsinline></video>
+https://github.com/user-attachments/assets/3231a478-e617-4804-beaa-a95504cd7cf9
 
 ## Features
 
