@@ -168,6 +168,11 @@ impl App {
         crate::hooks::setup::ensure_hooks_installed();
         let config = crate::config::Config::load();
         tmux::set_tmux_path(config.tmux_path());
+
+        // Clean up orphaned tmux sessions (agentick_* sessions that are no
+        // longer tracked in the store). This prevents resource exhaustion from
+        // sessions that were removed from the store without killing tmux.
+        Self::cleanup_orphaned_tmux_sessions(&store);
         let quick_create_keys = dashboard::available_quick_create_keys(config.quick_create_keys.as_ref());
         let mut app = Self {
             store,
@@ -407,6 +412,11 @@ impl App {
                 let id = id.clone();
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        // Kill the underlying tmux session before removing
+                        // from the store, so it doesn't leak.
+                        if let Some(session) = self.store.find_session(&id) {
+                            let _ = tmux::kill_session(&session.tmux_name);
+                        }
                         self.store.remove_session(&id);
                         let _ = self.store.save();
                         self.clamp_cursor();
@@ -1699,6 +1709,27 @@ impl App {
             query,
             self.status_filter.as_deref(),
         )
+    }
+
+    /// Kill tmux sessions prefixed with `agentick_` that are not tracked in
+    /// the session store. These are left over from sessions that were removed
+    /// from the store without killing the underlying tmux process.
+    fn cleanup_orphaned_tmux_sessions(store: &SessionStore) {
+        let tracked: HashSet<&str> = store
+            .sessions
+            .iter()
+            .map(|s| s.tmux_name.as_str())
+            .collect();
+
+        let Ok(tmux_sessions) = tmux::list_sessions() else {
+            return;
+        };
+
+        for info in &tmux_sessions {
+            if info.name.starts_with("agentick_") && !tracked.contains(info.name.as_str()) {
+                let _ = tmux::kill_session(&info.name);
+            }
+        }
     }
 }
 
